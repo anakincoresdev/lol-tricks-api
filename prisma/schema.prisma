@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Player {
+  id        String   @id @default(cuid())
+  puuid     String
+  gameName  String
+  region    String
+  tier      String
+  rank      String   @default("I")
+  lp        Int
+  wins      Int
+  losses    Int
+  winRate   Float
+  hotStreak Boolean  @default(false)
+  totalGames Int     @default(0)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  champions PlayerChampion[]
+
+  @@unique([puuid, region])
+  @@index([region, tier])
+}
+
+model PlayerChampion {
+  id           String @id @default(cuid())
+  playerId     String
+  championName String
+  gamesPlayed  Int
+
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, championName])
+}
+
+model Match {
+  id           String   @id @default(cuid())
+  matchId      String   @unique
+  region       String
+  gameDuration Int
+  gameCreation DateTime
+
+  participants MatchParticipant[]
+
+  createdAt DateTime @default(now())
+}
+
+model MatchParticipant {
+  id           String  @id @default(cuid())
+  matchId      String
+  puuid        String
+  championName String
+  kills        Int
+  deaths       Int
+  assists      Int
+  cs           Int
+  position     String
+  win          Boolean
+  items        Json
+  runes        Json
+  summoner1Id  Int     @default(0)
+  summoner2Id  Int     @default(0)
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([puuid])
+  @@index([puuid, championName])
+}
+
+model ChampionMastery {
+  id            String   @id @default(cuid())
+  puuid         String
+  championId    Int
+  championName  String
+  masteryPoints Int
+  masteryLevel  Int
+  region        String
+  updatedAt     DateTime @updatedAt
+
+  @@unique([puuid, championId, region])
+}
+
+model CollectionLog {
+  id        String   @id @default(cuid())
+  region    String
+  tier      String
+  collected Int
+  total     Int
+  createdAt DateTime @default(now())
+}

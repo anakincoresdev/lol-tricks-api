@@ -1,0 +1,139 @@
+import { Router } from 'express'
+import {
+  getPlatformHost,
+  getRegionalHost,
+  riotFetch,
+  delay,
+  getChampionNumericId,
+} from '../services/riot-client.js'
+import type { MatchDto, AccountDto } from '../types/riot.js'
+
+const router = Router()
+
+router.get('/player-champion-matches', async (req, res) => {
+  const puuid = (req.query['puuid'] as string) ?? ''
+  const champion = (req.query['champion'] as string) ?? ''
+  const region = (req.query['region'] as string) ?? 'euw'
+
+  if (!puuid) {
+    res.status(400).json({ error: 'puuid is required.' })
+    return
+  }
+  if (!champion) {
+    res.status(400).json({ error: 'champion is required.' })
+    return
+  }
+
+  const regionalHost = getRegionalHost(region)
+  const platformHost = getPlatformHost(region)
+
+  const account = await riotFetch<AccountDto>(
+    regionalHost,
+    `/riot/account/v1/accounts/by-puuid/${puuid}`,
+  ).catch(() => null)
+
+  const gameName = account
+    ? `${account.gameName}#${account.tagLine}`
+    : 'Unknown'
+
+  await delay(200)
+
+  const matchIds = await riotFetch<string[]>(
+    regionalHost,
+    `/lol/match/v5/matches/by-puuid/${puuid}/ids?queue=420&count=20`,
+  )
+
+  const championMatches: {
+    matchId: string
+    win: boolean
+    kills: number
+    deaths: number
+    assists: number
+    items: number[]
+    runes: { style: number; runes: number[] }[]
+    summoner1Id: number
+    summoner2Id: number
+    cs: number
+    gameDuration: number
+    gameCreation: number
+    position: string
+  }[] = []
+
+  const targetCount = 8
+
+  for (const matchId of matchIds) {
+    if (championMatches.length >= targetCount) break
+
+    await delay(300)
+
+    let match: MatchDto
+    try {
+      match = await riotFetch<MatchDto>(
+        regionalHost,
+        `/lol/match/v5/matches/${matchId}`,
+      )
+    } catch {
+      continue
+    }
+
+    const player = match.info.participants.find((p) => p.puuid === puuid)
+    if (!player) continue
+    if (player.championName.toLowerCase() !== champion.toLowerCase()) continue
+
+    championMatches.push({
+      matchId: match.metadata.matchId,
+      win: player.win,
+      kills: player.kills,
+      deaths: player.deaths,
+      assists: player.assists,
+      items: [
+        player.item0, player.item1, player.item2,
+        player.item3, player.item4, player.item5, player.item6,
+      ],
+      runes: player.perks.styles.map((style) => ({
+        style: style.style,
+        runes: style.selections.map((s) => s.perk),
+      })),
+      summoner1Id: player.summoner1Id,
+      summoner2Id: player.summoner2Id,
+      cs: player.totalMinionsKilled,
+      gameDuration: match.info.gameDuration,
+      gameCreation: match.info.gameCreation,
+      position: player.teamPosition,
+    })
+  }
+
+  // Fetch champion mastery
+  let masteryPoints = 0
+  let masteryLevel = 0
+
+  try {
+    const numericId = await getChampionNumericId(champion)
+    if (numericId) {
+      await delay(200)
+      const mastery = await riotFetch<{
+        championPoints: number
+        championLevel: number
+      }>(
+        platformHost,
+        `/lol/champion-mastery/v4/champion-masteries/by-puuid/${puuid}/by-champion/${numericId}`,
+      )
+      masteryPoints = mastery.championPoints
+      masteryLevel = mastery.championLevel
+    }
+  } catch {
+    // Mastery fetch is optional
+  }
+
+  res.json({
+    puuid,
+    champion,
+    region,
+    gameName,
+    masteryPoints,
+    masteryLevel,
+    matches: championMatches,
+  })
+})
+
+export default router

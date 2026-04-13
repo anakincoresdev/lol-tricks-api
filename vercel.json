@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "buildCommand": "npx prisma generate && npx tsc",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api" }
+  ],
+  "crons": [
+    {
+      "path": "/api/riot/collect?region=euw&tier=challenger",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=euw&tier=grandmaster",
+      "schedule": "0 18 * * *"
+    }
+  ]
+}
