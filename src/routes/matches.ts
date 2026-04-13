@@ -5,6 +5,76 @@ import type { MatchDto } from '../types/riot.js'
 
 const router = Router()
 
+/**
+ * @swagger
+ * /api/riot/matches/{puuid}:
+ *   get:
+ *     summary: Get player match history
+ *     description: Returns recent ranked match IDs and detailed data for the first 5 matches.
+ *     tags: [Matches]
+ *     parameters:
+ *       - in: path
+ *         name: puuid
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Player PUUID
+ *       - in: query
+ *         name: region
+ *         schema:
+ *           type: string
+ *           default: euw
+ *       - in: query
+ *         name: count
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *         description: Number of match IDs to fetch
+ *     responses:
+ *       200:
+ *         description: Match history
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 puuid:
+ *                   type: string
+ *                 region:
+ *                   type: string
+ *                 matchIds:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                 matches:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       matchId:
+ *                         type: string
+ *                       champion:
+ *                         type: string
+ *                       win:
+ *                         type: boolean
+ *                       kills:
+ *                         type: integer
+ *                       deaths:
+ *                         type: integer
+ *                       assists:
+ *                         type: integer
+ *                       items:
+ *                         type: array
+ *                         items:
+ *                           type: integer
+ *                       position:
+ *                         type: string
+ *                       cs:
+ *                         type: integer
+ *                       gameDuration:
+ *                         type: integer
+ */
 router.get('/matches/:puuid', async (req, res) => {
   const { puuid } = req.params
   const region = (req.query['region'] as string) ?? 'euw'

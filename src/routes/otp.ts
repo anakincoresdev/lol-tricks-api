@@ -26,6 +26,62 @@ interface OtpPlayer {
   otpPercent: number
 }
 
+/**
+ * @swagger
+ * /api/riot/otp:
+ *   get:
+ *     summary: Find one-trick players
+ *     description: Analyzes top players' recent matches to identify one-trick-ponies (35%+ games on one champion).
+ *     tags: [OTP]
+ *     parameters:
+ *       - in: query
+ *         name: region
+ *         schema:
+ *           type: string
+ *           default: euw
+ *       - in: query
+ *         name: tier
+ *         schema:
+ *           type: string
+ *           enum: [challenger, grandmaster, master]
+ *           default: challenger
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *           maximum: 10
+ *         description: Number of top players to analyze
+ *     responses:
+ *       200:
+ *         description: List of OTP players
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 region:
+ *                   type: string
+ *                 tier:
+ *                   type: string
+ *                 otpThreshold:
+ *                   type: integer
+ *                 players:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       puuid:
+ *                         type: string
+ *                       gameName:
+ *                         type: string
+ *                       mainChampion:
+ *                         type: string
+ *                       otpPercent:
+ *                         type: integer
+ *                       lp:
+ *                         type: integer
+ */
 router.get('/otp', async (req, res) => {
   const region = (req.query['region'] as string) ?? 'euw'
   const tier = (req.query['tier'] as string) ?? 'challenger'

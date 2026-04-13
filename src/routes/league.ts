@@ -7,6 +7,61 @@ const router = Router()
 
 const VALID_TIERS = ['challenger', 'grandmaster', 'master']
 
+/**
+ * @swagger
+ * /api/riot/league/{tier}:
+ *   get:
+ *     summary: Get top players by tier
+ *     description: Returns top 50 players sorted by LP for a given ranked tier.
+ *     tags: [League]
+ *     parameters:
+ *       - in: path
+ *         name: tier
+ *         required: true
+ *         schema:
+ *           type: string
+ *           enum: [challenger, grandmaster, master]
+ *         description: Ranked tier
+ *       - in: query
+ *         name: region
+ *         schema:
+ *           type: string
+ *           default: euw
+ *         description: Server region (euw, na, kr, etc.)
+ *     responses:
+ *       200:
+ *         description: List of top players
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tier:
+ *                   type: string
+ *                 region:
+ *                   type: string
+ *                 players:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       puuid:
+ *                         type: string
+ *                       tier:
+ *                         type: string
+ *                       lp:
+ *                         type: integer
+ *                       wins:
+ *                         type: integer
+ *                       losses:
+ *                         type: integer
+ *                       winRate:
+ *                         type: integer
+ *                       hotStreak:
+ *                         type: boolean
+ *       400:
+ *         description: Invalid tier
+ */
 router.get('/league/:tier', async (req, res) => {
   const { tier } = req.params
   const region = (req.query['region'] as string) ?? 'euw'

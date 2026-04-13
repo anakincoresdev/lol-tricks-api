@@ -10,6 +10,79 @@ import type { MatchDto, AccountDto } from '../types/riot.js'
 
 const router = Router()
 
+/**
+ * @swagger
+ * /api/riot/player-champion-matches:
+ *   get:
+ *     summary: Get player's matches on a specific champion
+ *     description: Fetches up to 8 recent ranked matches where the player played a specific champion, with full build data.
+ *     tags: [Matches]
+ *     parameters:
+ *       - in: query
+ *         name: puuid
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Player PUUID
+ *       - in: query
+ *         name: champion
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Champion name (e.g. Yasuo)
+ *       - in: query
+ *         name: region
+ *         schema:
+ *           type: string
+ *           default: euw
+ *     responses:
+ *       200:
+ *         description: Champion-specific match history with mastery info
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 puuid:
+ *                   type: string
+ *                 champion:
+ *                   type: string
+ *                 region:
+ *                   type: string
+ *                 gameName:
+ *                   type: string
+ *                 masteryPoints:
+ *                   type: integer
+ *                 masteryLevel:
+ *                   type: integer
+ *                 matches:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       matchId:
+ *                         type: string
+ *                       win:
+ *                         type: boolean
+ *                       kills:
+ *                         type: integer
+ *                       deaths:
+ *                         type: integer
+ *                       assists:
+ *                         type: integer
+ *                       items:
+ *                         type: array
+ *                         items:
+ *                           type: integer
+ *                       runes:
+ *                         type: array
+ *                       position:
+ *                         type: string
+ *                       gameDuration:
+ *                         type: integer
+ *       400:
+ *         description: Missing puuid or champion
+ */
 router.get('/player-champion-matches', async (req, res) => {
   const puuid = (req.query['puuid'] as string) ?? ''
   const champion = (req.query['champion'] as string) ?? ''

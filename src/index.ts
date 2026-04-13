@@ -1,6 +1,8 @@
 import express from 'express'
 import cors from 'cors'
+import swaggerUi from 'swagger-ui-express'
 import { config } from './config.js'
+import { swaggerSpec } from './swagger.js'
 import { errorHandler } from './middleware/error-handler.js'
 import leagueRouter from './routes/league.js'
 import otpRouter from './routes/otp.js'
@@ -21,6 +23,12 @@ app.use('/api/riot', collectRouter)
 app.use('/api/riot', championPlayersRouter)
 app.use('/api/riot', matchesRouter)
 app.use('/api/riot', playerChampionMatchesRouter)
+
+// Swagger docs
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec))
+app.get('/docs.json', (_req, res) => {
+  res.json(swaggerSpec)
+})
 
 // Health check
 app.get('/health', (_req, res) => {

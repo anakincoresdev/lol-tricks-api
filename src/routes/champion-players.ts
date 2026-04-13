@@ -19,6 +19,59 @@ const router = Router()
 
 const MIN_MASTERY_POINTS = 50_000
 
+/**
+ * @swagger
+ * /api/riot/champion-players:
+ *   get:
+ *     summary: Find top players for a champion
+ *     description: Searches Challenger/Grandmaster/Master for players with 50k+ mastery points on a specific champion.
+ *     tags: [Champions]
+ *     parameters:
+ *       - in: query
+ *         name: champion
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Champion name (e.g. Yasuo, LeeSin)
+ *       - in: query
+ *         name: region
+ *         schema:
+ *           type: string
+ *           default: euw
+ *     responses:
+ *       200:
+ *         description: List of champion mains
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 champion:
+ *                   type: string
+ *                 region:
+ *                   type: string
+ *                 players:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       puuid:
+ *                         type: string
+ *                       gameName:
+ *                         type: string
+ *                       tier:
+ *                         type: string
+ *                       lp:
+ *                         type: integer
+ *                       winRate:
+ *                         type: integer
+ *                       masteryPoints:
+ *                         type: integer
+ *                       masteryLevel:
+ *                         type: integer
+ *       400:
+ *         description: Missing or unknown champion
+ */
 router.get('/champion-players', async (req, res) => {
   const champion = (req.query['champion'] as string) ?? ''
   const region = (req.query['region'] as string) ?? 'euw'

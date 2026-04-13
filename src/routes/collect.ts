@@ -13,6 +13,50 @@ const router = Router()
 
 const VALID_TIERS = ['challenger', 'grandmaster', 'master']
 
+/**
+ * @swagger
+ * /api/riot/collect:
+ *   get:
+ *     summary: Collect player data (cron job)
+ *     description: Fetches and stores data for top 10 players in a tier. Requires secret for authorization.
+ *     tags: [Collect]
+ *     parameters:
+ *       - in: query
+ *         name: region
+ *         schema:
+ *           type: string
+ *           default: euw
+ *       - in: query
+ *         name: tier
+ *         schema:
+ *           type: string
+ *           enum: [challenger, grandmaster, master]
+ *           default: challenger
+ *       - in: query
+ *         name: secret
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Cron secret for authorization
+ *     responses:
+ *       200:
+ *         description: Collection results
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 region:
+ *                   type: string
+ *                 tier:
+ *                   type: string
+ *                 collected:
+ *                   type: integer
+ *                 total:
+ *                   type: integer
+ *       401:
+ *         description: Unauthorized
+ */
 router.get('/collect', async (req, res) => {
   const region = (req.query['region'] as string) ?? 'euw'
   const tier = (req.query['tier'] as string) ?? 'challenger'
