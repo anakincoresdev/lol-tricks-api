@@ -1,6 +1,5 @@
 import express from 'express'
 import cors from 'cors'
-import swaggerUi from 'swagger-ui-express'
 import { config } from './config.js'
 import { swaggerSpec } from './swagger.js'
 import { errorHandler } from './middleware/error-handler.js'
@@ -25,9 +24,25 @@ app.use('/api/riot', matchesRouter)
 app.use('/api/riot', playerChampionMatchesRouter)
 
 // Swagger docs
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec))
 app.get('/docs.json', (_req, res) => {
   res.json(swaggerSpec)
+})
+app.get('/docs', (_req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>LoL Tricks API — Swagger</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({ url: '/docs.json', dom_id: '#swagger-ui' });
+  </script>
+</body>
+</html>`)
 })
 
 // Health check
