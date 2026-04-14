@@ -13,6 +13,7 @@ import type {
   LeagueEntry,
   ChampionMasteryDto,
   AccountDto,
+  MatchDto,
 } from '../types/riot.js'
 
 const router = Router()
@@ -20,17 +21,100 @@ const router = Router()
 const MIN_MASTERY_POINTS = 10_000 // Lowered from 50k — catches more players
 const CACHE_TTL_MS = 30 * 60 * 1000
 
+interface PlayerRuneInfo {
+  keystone: number
+  primaryStyle: number
+  secondaryStyle: number
+}
+
 interface ChampionPlayerResult {
   puuid: string
   gameName: string
   region: string
   tier: string
+  rank: string
   lp: number
   wins: number
   losses: number
   winRate: number
   masteryPoints: number
   masteryLevel: number
+  runes: PlayerRuneInfo | null
+}
+
+async function fetchRunesForPlayers(
+  players: { puuid: string }[],
+  regionalHost: string,
+  max: number,
+): Promise<Map<string, PlayerRuneInfo>> {
+  const runeMap = new Map<string, PlayerRuneInfo>()
+  const slice = players.slice(0, max)
+  if (slice.length === 0) return runeMap
+
+  const recentIds = await batchRequests(
+    slice.map(
+      (p) =>
+        () =>
+          riotFetch<string[]>(
+            regionalHost,
+            `/lol/match/v5/matches/by-puuid/${p.puuid}/ids?queue=420&count=3`,
+          ).catch(() => [] as string[]),
+    ),
+    10,
+    200,
+  )
+
+  const matchSpecs: { puuid: string; matchId: string }[] = []
+  slice.forEach((p, idx) => {
+    const ids = recentIds[idx]
+    if (ids && ids.length > 0 && ids[0]) {
+      matchSpecs.push({ puuid: p.puuid, matchId: ids[0] })
+    }
+  })
+
+  if (matchSpecs.length === 0) return runeMap
+
+  await delay(150)
+
+  const matches = await batchRequests(
+    matchSpecs.map(
+      (spec) =>
+        () =>
+          riotFetch<MatchDto>(
+            regionalHost,
+            `/lol/match/v5/matches/${spec.matchId}`,
+          ).catch(() => null as unknown as MatchDto),
+    ),
+    10,
+    200,
+  )
+
+  matches.forEach((match, idx) => {
+    if (!match) return
+    const spec = matchSpecs[idx]
+    if (!spec) return
+    const me = match.info.participants.find((p) => p.puuid === spec.puuid)
+    if (!me || !me.perks || me.perks.styles.length === 0) return
+
+    const primary =
+      me.perks.styles.find((s) => s.description === 'primaryStyle') ??
+      me.perks.styles[0]
+    const secondary =
+      me.perks.styles.find((s) => s.description === 'subStyle') ??
+      me.perks.styles[1]
+    if (!primary) return
+
+    const keystonePerk = primary.selections[0]?.perk
+    if (!keystonePerk) return
+
+    runeMap.set(spec.puuid, {
+      keystone: keystonePerk,
+      primaryStyle: primary.style,
+      secondaryStyle: secondary?.style ?? 0,
+    })
+  })
+
+  return runeMap
 }
 
 async function getChampionPlayersForRegion(
@@ -38,7 +122,10 @@ async function getChampionPlayersForRegion(
   championNumericId: number,
   region: string,
   forceRefresh: boolean,
+  withRunes: boolean,
 ): Promise<{ source: 'cache' | 'riot'; players: ChampionPlayerResult[] }> {
+  const regionalHost = getRegionalHost(region)
+
   // Try DB first
   if (!forceRefresh) {
     const cachedMasteries = await prisma.championMastery.findMany({
@@ -61,7 +148,7 @@ async function getChampionPlayersForRegion(
       })
       const playerMap = new Map(dbPlayers.map((p) => [p.puuid, p]))
 
-      const result = cachedMasteries
+      const base = cachedMasteries
         .map((m) => {
           const player = playerMap.get(m.puuid)
           return player
@@ -70,29 +157,35 @@ async function getChampionPlayersForRegion(
                 gameName: player.gameName,
                 region,
                 tier: player.tier,
+                rank: player.rank ?? 'I',
                 lp: player.lp,
                 wins: player.wins,
                 losses: player.losses,
                 winRate: player.winRate,
                 masteryPoints: m.masteryPoints,
                 masteryLevel: m.masteryLevel,
+                runes: null as PlayerRuneInfo | null,
               }
             : null
         })
         .filter((p): p is ChampionPlayerResult => p !== null)
         .sort((a, b) => b.lp - a.lp)
 
-      if (result.length > 0) {
-        return { source: 'cache', players: result }
+      if (base.length > 0) {
+        if (withRunes) {
+          const runeMap = await fetchRunesForPlayers(base, regionalHost, 15)
+          for (const p of base) {
+            p.runes = runeMap.get(p.puuid) ?? null
+          }
+        }
+        return { source: 'cache', players: base }
       }
     }
   }
 
   // Fallback: Riot API
   const platformHost = getPlatformHost(region)
-  const regionalHost = getRegionalHost(region)
 
-  // Fetch ALL players from all 3 apex tiers
   const tiers = ['challenger', 'grandmaster', 'master'] as const
   const leagueResults = await Promise.all(
     tiers.map((t) =>
@@ -111,13 +204,10 @@ async function getChampionPlayersForRegion(
   }
   allEntries.sort((a, b) => b.leaguePoints - a.leaguePoints)
 
-  // Scan up to 300 players (all of Challenger + top Grandmaster)
   const topPlayers = allEntries.slice(0, 300)
 
   await delay(200)
 
-  // Query mastery for the SPECIFIC champion, not top-5
-  // This catches every player who has ever played this champion
   const masteryResults = await batchRequests(
     topPlayers.map(
       (player) => () =>
@@ -144,7 +234,6 @@ async function getChampionPlayersForRegion(
       matchedPlayers.push({ entry, mastery })
     }
 
-    // Cache in DB
     void prisma.championMastery.upsert({
       where: {
         puuid_championId_region: {
@@ -169,13 +258,13 @@ async function getChampionPlayersForRegion(
     })
   }
 
-  // Sort by mastery points descending
-  matchedPlayers.sort((a, b) => b.mastery.championPoints - a.mastery.championPoints)
+  matchedPlayers.sort(
+    (a, b) => b.mastery.championPoints - a.mastery.championPoints,
+  )
   const toResolve = matchedPlayers.slice(0, 50)
 
   await delay(200)
 
-  // Fetch display names
   const accountResults = await batchRequests(
     toResolve.map(
       ({ entry }) =>
@@ -189,7 +278,7 @@ async function getChampionPlayersForRegion(
     250,
   )
 
-  const players: ChampionPlayerResult[] = []
+  const base: ChampionPlayerResult[] = []
   for (let i = 0; i < toResolve.length; i++) {
     const item = toResolve[i]
     if (!item) continue
@@ -199,21 +288,30 @@ async function getChampionPlayersForRegion(
       ? `${account.gameName}#${account.tagLine}`
       : 'Unknown'
 
-    players.push({
+    base.push({
       puuid: entry.puuid,
       gameName,
       region,
       tier: entry.tierName,
+      rank: entry.rank ?? 'I',
       lp: entry.leaguePoints,
       wins: entry.wins,
       losses: entry.losses,
       winRate: Math.round((entry.wins / (entry.wins + entry.losses)) * 100),
       masteryPoints: mastery.championPoints,
       masteryLevel: mastery.championLevel,
+      runes: null,
     })
   }
 
-  return { source: 'riot', players }
+  if (withRunes && base.length > 0) {
+    const runeMap = await fetchRunesForPlayers(base, regionalHost, 15)
+    for (const p of base) {
+      p.runes = runeMap.get(p.puuid) ?? null
+    }
+  }
+
+  return { source: 'riot', players: base }
 }
 
 // Single region
@@ -221,6 +319,7 @@ router.get('/champion-players', async (req, res) => {
   const champion = (req.query['champion'] as string) ?? ''
   const region = (req.query['region'] as string) ?? 'euw'
   const forceRefresh = req.query['refresh'] === 'true'
+  const withRunes = req.query['runes'] !== 'false'
 
   if (!champion) {
     res.status(400).json({ error: 'Champion parameter is required.' })
@@ -238,6 +337,7 @@ router.get('/champion-players', async (req, res) => {
     championNumericId,
     region,
     forceRefresh,
+    withRunes,
   )
 
   res.json({ champion, region, ...result })
@@ -248,6 +348,7 @@ router.get('/champion-players/multi', async (req, res) => {
   const champion = (req.query['champion'] as string) ?? ''
   const regionsParam = (req.query['regions'] as string) ?? ''
   const forceRefresh = req.query['refresh'] === 'true'
+  const withRunes = req.query['runes'] !== 'false'
 
   if (!champion) {
     res.status(400).json({ error: 'Champion parameter is required.' })
@@ -274,7 +375,6 @@ router.get('/champion-players/multi', async (req, res) => {
     return
   }
 
-  // Fetch all regions in parallel
   const results = await Promise.allSettled(
     regions.map((region) =>
       getChampionPlayersForRegion(
@@ -282,6 +382,7 @@ router.get('/champion-players/multi', async (req, res) => {
         championNumericId,
         region,
         forceRefresh,
+        withRunes,
       ).then((result) => ({ region, ...result })),
     ),
   )
@@ -308,7 +409,7 @@ router.get('/champion-players/multi', async (req, res) => {
 
   const allPlayers = Object.values(byRegion)
     .flatMap((r) => r.players)
-    .sort((a, b) => b.masteryPoints - a.masteryPoints)
+    .sort((a, b) => b.lp - a.lp)
 
   res.json({
     champion,
