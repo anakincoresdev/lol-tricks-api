@@ -6,6 +6,7 @@ import {
   batchRequests,
   delay,
   getChampionNumericId,
+  getChampionNameById,
 } from '../services/riot-client.js'
 import { prisma } from '../prisma.js'
 import type {
@@ -18,63 +19,12 @@ import type {
 const router = Router()
 
 const MIN_MASTERY_POINTS = 50_000
+const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
-/**
- * @swagger
- * /api/riot/champion-players:
- *   get:
- *     summary: Find top players for a champion
- *     description: Searches Challenger/Grandmaster/Master for players with 50k+ mastery points on a specific champion.
- *     tags: [Champions]
- *     parameters:
- *       - in: query
- *         name: champion
- *         required: true
- *         schema:
- *           type: string
- *         description: Champion name (e.g. Yasuo, LeeSin)
- *       - in: query
- *         name: region
- *         schema:
- *           type: string
- *           default: euw
- *     responses:
- *       200:
- *         description: List of champion mains
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 champion:
- *                   type: string
- *                 region:
- *                   type: string
- *                 players:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       puuid:
- *                         type: string
- *                       gameName:
- *                         type: string
- *                       tier:
- *                         type: string
- *                       lp:
- *                         type: integer
- *                       winRate:
- *                         type: integer
- *                       masteryPoints:
- *                         type: integer
- *                       masteryLevel:
- *                         type: integer
- *       400:
- *         description: Missing or unknown champion
- */
 router.get('/champion-players', async (req, res) => {
   const champion = (req.query['champion'] as string) ?? ''
   const region = (req.query['region'] as string) ?? 'euw'
+  const forceRefresh = req.query['refresh'] === 'true'
 
   if (!champion) {
     res.status(400).json({ error: 'Champion parameter is required.' })
@@ -87,16 +37,66 @@ router.get('/champion-players', async (req, res) => {
     return
   }
 
+  // Try DB first: find players with mastery on this champion
+  if (!forceRefresh) {
+    const cachedMasteries = await prisma.championMastery.findMany({
+      where: {
+        championId: championNumericId,
+        region,
+        masteryPoints: { gte: MIN_MASTERY_POINTS },
+        updatedAt: { gte: new Date(Date.now() - CACHE_TTL_MS) },
+      },
+      orderBy: { masteryPoints: 'desc' },
+      take: 20,
+    })
+
+    if (cachedMasteries.length > 0) {
+      // Get player info for these puuids
+      const players = await prisma.player.findMany({
+        where: {
+          puuid: { in: cachedMasteries.map((m) => m.puuid) },
+          region,
+        },
+      })
+      const playerMap = new Map(players.map((p) => [p.puuid, p]))
+
+      const result = cachedMasteries
+        .map((m) => {
+          const player = playerMap.get(m.puuid)
+          return player
+            ? {
+                puuid: m.puuid,
+                gameName: player.gameName,
+                tier: player.tier,
+                lp: player.lp,
+                wins: player.wins,
+                losses: player.losses,
+                winRate: player.winRate,
+                masteryPoints: m.masteryPoints,
+                masteryLevel: m.masteryLevel,
+              }
+            : null
+        })
+        .filter(Boolean)
+        .sort((a, b) => b!.lp - a!.lp)
+
+      if (result.length > 0) {
+        res.json({ champion, region, source: 'cache', players: result })
+        return
+      }
+    }
+  }
+
+  // Fallback: Riot API
   const platformHost = getPlatformHost(region)
   const regionalHost = getRegionalHost(region)
 
-  // Fetch all 3 tiers in parallel
   const tiers = ['challenger', 'grandmaster', 'master'] as const
   const leagueResults = await Promise.all(
-    tiers.map((tier) =>
+    tiers.map((t) =>
       riotFetch<LeagueList>(
         platformHost,
-        `/lol/league/v4/${tier}leagues/by-queue/RANKED_SOLO_5x5`,
+        `/lol/league/v4/${t}leagues/by-queue/RANKED_SOLO_5x5`,
       ),
     ),
   )
@@ -112,13 +112,13 @@ router.get('/champion-players', async (req, res) => {
 
   await delay(200)
 
-  // Batch check champion mastery
+  // Use /top?count=5 instead of per-champion query — fewer wasted requests
   const masteryResults = await batchRequests(
     topPlayers.map(
       (player) => () =>
-        riotFetch<ChampionMasteryDto>(
+        riotFetch<ChampionMasteryDto[]>(
           platformHost,
-          `/lol/champion-mastery/v4/champion-masteries/by-puuid/${player.puuid}/by-champion/${championNumericId}`,
+          `/lol/champion-mastery/v4/champion-masteries/by-puuid/${player.puuid}/top?count=5`,
         ),
     ),
     10,
@@ -131,16 +131,49 @@ router.get('/champion-players', async (req, res) => {
   }[] = []
 
   for (let i = 0; i < topPlayers.length; i++) {
-    const mastery = masteryResults[i]
+    const masteries = masteryResults[i]
     const entry = topPlayers[i]
-    if (entry && mastery && mastery.championPoints >= MIN_MASTERY_POINTS) {
-      matchedPlayers.push({ entry, mastery })
+    if (!entry || !masteries) continue
+
+    const championMastery = masteries.find(
+      (m) => m.championId === championNumericId,
+    )
+    if (championMastery && championMastery.championPoints >= MIN_MASTERY_POINTS) {
+      matchedPlayers.push({ entry, mastery: championMastery })
+    }
+
+    // Cache all top-5 masteries in DB
+    for (const m of masteries) {
+      const champName = await getChampionNameById(m.championId)
+      if (!champName) continue
+      void prisma.championMastery.upsert({
+        where: {
+          puuid_championId_region: {
+            puuid: entry.puuid,
+            championId: m.championId,
+            region,
+          },
+        },
+        update: {
+          championName: champName,
+          masteryPoints: m.championPoints,
+          masteryLevel: m.championLevel,
+        },
+        create: {
+          puuid: entry.puuid,
+          championId: m.championId,
+          championName: champName,
+          masteryPoints: m.championPoints,
+          masteryLevel: m.championLevel,
+          region,
+        },
+      })
     }
   }
 
   matchedPlayers.sort((a, b) => b.entry.leaguePoints - a.entry.leaguePoints)
-
   const toResolve = matchedPlayers.slice(0, 20)
+
   await delay(200)
 
   const accountResults = await batchRequests(
@@ -177,33 +210,9 @@ router.get('/champion-players', async (req, res) => {
       masteryPoints: mastery.championPoints,
       masteryLevel: mastery.championLevel,
     })
-
-    // Cache mastery in DB
-    await prisma.championMastery.upsert({
-      where: {
-        puuid_championId_region: {
-          puuid: entry.puuid,
-          championId: championNumericId,
-          region,
-        },
-      },
-      update: {
-        masteryPoints: mastery.championPoints,
-        masteryLevel: mastery.championLevel,
-        championName: champion,
-      },
-      create: {
-        puuid: entry.puuid,
-        championId: championNumericId,
-        championName: champion,
-        masteryPoints: mastery.championPoints,
-        masteryLevel: mastery.championLevel,
-        region,
-      },
-    })
   }
 
-  res.json({ champion, region, players })
+  res.json({ champion, region, source: 'riot', players })
 })
 
 export default router

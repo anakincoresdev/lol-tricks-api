@@ -4,63 +4,27 @@ import {
   getRegionalHost,
   riotFetch,
   batchRequests,
+  delay,
+  getChampionNameById,
 } from '../services/riot-client.js'
 import { prisma } from '../prisma.js'
 import { config } from '../config.js'
-import type { LeagueList, MatchDto } from '../types/riot.js'
+import type {
+  LeagueList,
+  MatchDto,
+  AccountDto,
+  ChampionMasteryDto,
+} from '../types/riot.js'
 
 const router = Router()
 
 const VALID_TIERS = ['challenger', 'grandmaster', 'master']
 
-/**
- * @swagger
- * /api/riot/collect:
- *   get:
- *     summary: Collect player data (cron job)
- *     description: Fetches and stores data for top 10 players in a tier. Requires secret for authorization.
- *     tags: [Collect]
- *     parameters:
- *       - in: query
- *         name: region
- *         schema:
- *           type: string
- *           default: euw
- *       - in: query
- *         name: tier
- *         schema:
- *           type: string
- *           enum: [challenger, grandmaster, master]
- *           default: challenger
- *       - in: query
- *         name: secret
- *         required: true
- *         schema:
- *           type: string
- *         description: Cron secret for authorization
- *     responses:
- *       200:
- *         description: Collection results
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 region:
- *                   type: string
- *                 tier:
- *                   type: string
- *                 collected:
- *                   type: integer
- *                 total:
- *                   type: integer
- *       401:
- *         description: Unauthorized
- */
 router.get('/collect', async (req, res) => {
   const region = (req.query['region'] as string) ?? 'euw'
   const tier = (req.query['tier'] as string) ?? 'challenger'
   const secret = req.query['secret'] as string | undefined
+  const limit = Math.min(Number(req.query['limit']) || 50, 200)
 
   const authHeader = req.headers['authorization']
   const isAuthorized =
@@ -81,6 +45,7 @@ router.get('/collect', async (req, res) => {
   const platformHost = getPlatformHost(region)
   const regionalHost = getRegionalHost(region)
 
+  // 1. Fetch league — all players in tier (single request)
   const league = await riotFetch<LeagueList>(
     platformHost,
     `/lol/league/v4/${tier}leagues/by-queue/RANKED_SOLO_5x5`,
@@ -88,9 +53,39 @@ router.get('/collect', async (req, res) => {
 
   const topPlayers = league.entries
     .sort((a, b) => b.leaguePoints - a.leaguePoints)
-    .slice(0, 10)
+    .slice(0, limit)
 
-  // Fetch match IDs in parallel batches
+  // 2. Fetch account names in batches
+  const accountResults = await batchRequests(
+    topPlayers.map(
+      (player) => () =>
+        riotFetch<AccountDto>(
+          regionalHost,
+          `/riot/account/v1/accounts/by-puuid/${player.puuid}`,
+        ),
+    ),
+    10,
+    300,
+  )
+
+  await delay(200)
+
+  // 3. Fetch top-5 champion mastery for each player
+  const masteryResults = await batchRequests(
+    topPlayers.map(
+      (player) => () =>
+        riotFetch<ChampionMasteryDto[]>(
+          platformHost,
+          `/lol/champion-mastery/v4/champion-masteries/by-puuid/${player.puuid}/top?count=5`,
+        ),
+    ),
+    10,
+    300,
+  )
+
+  await delay(200)
+
+  // 4. Fetch match IDs in batches
   const matchIdResults = await batchRequests(
     topPlayers.map(
       (player) => () =>
@@ -100,96 +95,127 @@ router.get('/collect', async (req, res) => {
         ),
     ),
     5,
-    250,
+    300,
   )
 
-  // Build match detail requests
-  const matchRequests: { playerIndex: number; matchId: string }[] = []
+  // 5. Collect unique match IDs (skip already stored)
+  const allMatchIds = new Set<string>()
+  const playerMatchMap = new Map<number, string[]>()
+
   for (let i = 0; i < topPlayers.length; i++) {
     const matchIds = matchIdResults[i]
-    if (!matchIds || matchIds.length === 0) continue
-    for (const matchId of matchIds.slice(0, 5)) {
-      matchRequests.push({ playerIndex: i, matchId })
+    if (!matchIds) continue
+    const ids = matchIds.slice(0, 5)
+    playerMatchMap.set(i, ids)
+    for (const id of ids) allMatchIds.add(id)
+  }
+
+  // Check which matches already exist in DB
+  const existingMatches = await prisma.match.findMany({
+    where: { matchId: { in: [...allMatchIds] } },
+    select: { matchId: true },
+  })
+  const existingSet = new Set(existingMatches.map((m) => m.matchId))
+  const newMatchIds = [...allMatchIds].filter((id) => !existingSet.has(id))
+
+  // 6. Fetch only new match details
+  const matchDetailMap = new Map<string, MatchDto>()
+
+  if (newMatchIds.length > 0) {
+    const matchDetails = await batchRequests(
+      newMatchIds.map(
+        (matchId) => () =>
+          riotFetch<MatchDto>(
+            regionalHost,
+            `/lol/match/v5/matches/${matchId}`,
+          ),
+      ),
+      5,
+      300,
+    )
+
+    for (let i = 0; i < newMatchIds.length; i++) {
+      const detail = matchDetails[i]
+      const matchId = newMatchIds[i]
+      if (detail && matchId) matchDetailMap.set(matchId, detail)
     }
   }
 
-  // Fetch match details
-  const matchDetailResults = await batchRequests(
-    matchRequests.map(
-      ({ matchId }) =>
-        () =>
-          riotFetch<MatchDto>(regionalHost, `/lol/match/v5/matches/${matchId}`),
-    ),
-    5,
-    250,
-  )
+  // 7. Store matches in DB
+  for (const [matchId, match] of matchDetailMap) {
+    await prisma.match.create({
+      data: {
+        matchId,
+        region,
+        gameDuration: match.info.gameDuration,
+        gameCreation: new Date(match.info.gameCreation),
+        participants: {
+          create: match.info.participants.map((p) => ({
+            puuid: p.puuid,
+            championName: p.championName,
+            kills: p.kills,
+            deaths: p.deaths,
+            assists: p.assists,
+            cs: p.totalMinionsKilled,
+            position: p.teamPosition,
+            win: p.win,
+            items: [
+              p.item0, p.item1, p.item2,
+              p.item3, p.item4, p.item5, p.item6,
+            ].filter((item) => item > 0),
+            runes: p.perks.styles.map((style) => ({
+              style: style.style,
+              runes: style.selections.map((s) => s.perk),
+            })),
+            summoner1Id: p.summoner1Id,
+            summoner2Id: p.summoner2Id,
+          })),
+        },
+      },
+    })
+  }
 
-  // Build and store player data
+  // 8. Upsert players, champion stats, and mastery
   let collected = 0
 
   for (let i = 0; i < topPlayers.length; i++) {
     const player = topPlayers[i]
     if (!player) continue
+
+    const account = accountResults[i]
+    const gameName = account
+      ? `${account.gameName}#${account.tagLine}`
+      : 'Unknown'
+
+    // Count champions from matches
     const champions: Record<string, number> = {}
-    let gameName = 'Unknown'
     let totalGames = 0
+    const matchIds = playerMatchMap.get(i) ?? []
 
-    for (let j = 0; j < matchRequests.length; j++) {
-      const req = matchRequests[j]
-      if (!req || req.playerIndex !== i) continue
-      const match = matchDetailResults[j]
-      if (!match) continue
-
-      const participant = match.info.participants.find(
-        (p) => p.puuid === player.puuid,
-      )
-      if (participant) {
-        const champ = participant.championName
-        champions[champ] = (champions[champ] ?? 0) + 1
-        gameName =
-          participant.riotIdGameName ?? participant.summonerName ?? gameName
-        totalGames++
-      }
-
-      // Store match in DB
-      const existingMatch = await prisma.match.findUnique({
-        where: { matchId: match.metadata.matchId },
-      })
-      if (!existingMatch) {
-        await prisma.match.create({
-          data: {
-            matchId: match.metadata.matchId,
-            region,
-            gameDuration: match.info.gameDuration,
-            gameCreation: new Date(match.info.gameCreation),
-            participants: {
-              create: match.info.participants.map((p) => ({
-                puuid: p.puuid,
-                championName: p.championName,
-                kills: p.kills,
-                deaths: p.deaths,
-                assists: p.assists,
-                cs: p.totalMinionsKilled,
-                position: p.teamPosition,
-                win: p.win,
-                items: [
-                  p.item0, p.item1, p.item2,
-                  p.item3, p.item4, p.item5, p.item6,
-                ].filter((item) => item > 0),
-                runes: p.perks.styles.map((style) => ({
-                  style: style.style,
-                  runes: style.selections.map((s) => s.perk),
-                })),
-                summoner1Id: p.summoner1Id,
-                summoner2Id: p.summoner2Id,
-              })),
-            },
-          },
+    for (const matchId of matchIds) {
+      // Check new matches first, then DB
+      const match = matchDetailMap.get(matchId)
+      if (match) {
+        const participant = match.info.participants.find(
+          (p) => p.puuid === player.puuid,
+        )
+        if (participant) {
+          champions[participant.championName] =
+            (champions[participant.championName] ?? 0) + 1
+          totalGames++
+        }
+      } else {
+        // Match already in DB — query participant
+        const dbParticipant = await prisma.matchParticipant.findFirst({
+          where: { puuid: player.puuid, match: { matchId } },
         })
+        if (dbParticipant) {
+          champions[dbParticipant.championName] =
+            (champions[dbParticipant.championName] ?? 0) + 1
+          totalGames++
+        }
       }
     }
-
-    if (totalGames === 0) continue
 
     // Upsert player
     const dbPlayer = await prisma.player.upsert({
@@ -203,6 +229,7 @@ router.get('/collect', async (req, res) => {
         winRate: Math.round(
           (player.wins / (player.wins + player.losses)) * 100,
         ),
+        hotStreak: player.hotStreak,
         totalGames,
       },
       create: {
@@ -216,28 +243,57 @@ router.get('/collect', async (req, res) => {
         winRate: Math.round(
           (player.wins / (player.wins + player.losses)) * 100,
         ),
+        hotStreak: player.hotStreak,
         totalGames,
       },
     })
 
-    // Upsert champion stats
+    // Upsert champion play stats
     for (const [championName, gamesPlayed] of Object.entries(champions)) {
       await prisma.playerChampion.upsert({
         where: {
-          playerId_championName: {
-            playerId: dbPlayer.id,
-            championName,
-          },
+          playerId_championName: { playerId: dbPlayer.id, championName },
         },
         update: { gamesPlayed },
         create: { playerId: dbPlayer.id, championName, gamesPlayed },
       })
     }
 
+    // Upsert champion mastery from top-5
+    const masteries = masteryResults[i]
+    if (masteries) {
+      for (const m of masteries) {
+        const champName = await getChampionNameById(m.championId)
+        if (!champName) continue
+        await prisma.championMastery.upsert({
+          where: {
+            puuid_championId_region: {
+              puuid: player.puuid,
+              championId: m.championId,
+              region,
+            },
+          },
+          update: {
+            championName: champName,
+            masteryPoints: m.championPoints,
+            masteryLevel: m.championLevel,
+          },
+          create: {
+            puuid: player.puuid,
+            championId: m.championId,
+            championName: champName,
+            masteryPoints: m.championPoints,
+            masteryLevel: m.championLevel,
+            region,
+          },
+        })
+      }
+    }
+
     collected++
   }
 
-  // Log collection
+  // Log
   const total = await prisma.player.count({
     where: { region, tier: league.tier },
   })
@@ -245,7 +301,13 @@ router.get('/collect', async (req, res) => {
     data: { region, tier: league.tier, collected, total },
   })
 
-  res.json({ region, tier: league.tier, collected, total })
+  res.json({
+    region,
+    tier: league.tier,
+    collected,
+    total,
+    newMatches: matchDetailMap.size,
+  })
 })
 
 export default router

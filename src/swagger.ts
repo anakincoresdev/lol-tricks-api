@@ -5,13 +5,20 @@ const regionParam = {
   description: 'Server region (euw, na, kr, eune, br, jp, lan, las, oce, tr, ru)',
 }
 
+const refreshParam = {
+  in: 'query',
+  name: 'refresh',
+  schema: { type: 'string', enum: ['true'] },
+  description: 'Set to "true" to bypass DB cache and fetch fresh data from Riot API',
+}
+
 export const swaggerSpec = {
   openapi: '3.0.0',
   info: {
     title: 'LoL Tricks API',
-    version: '1.0.0',
+    version: '2.0.0',
     description:
-      'REST API for League of Legends player analytics — OTP detection, champion mains, match history, and league standings.',
+      'REST API for League of Legends player analytics — OTP detection, champion mains, match history, and league standings. Data is cached in PostgreSQL; use /collect to populate, other endpoints read from cache with Riot API fallback.',
   },
   servers: [
     { url: 'https://lol-tricks-api.vercel.app', description: 'Production' },
@@ -28,7 +35,8 @@ export const swaggerSpec = {
     '/api/riot/league/{tier}': {
       get: {
         summary: 'Get top players by tier',
-        description: 'Returns top 50 players sorted by LP for a given ranked tier.',
+        description:
+          'Returns top 50 players sorted by LP. Reads from DB cache (10 min TTL), falls back to Riot API.',
         tags: ['League'],
         parameters: [
           {
@@ -39,6 +47,7 @@ export const swaggerSpec = {
             description: 'Ranked tier',
           },
           regionParam,
+          refreshParam,
         ],
         responses: {
           '200': {
@@ -50,13 +59,14 @@ export const swaggerSpec = {
                   properties: {
                     tier: { type: 'string', example: 'CHALLENGER' },
                     region: { type: 'string', example: 'euw' },
+                    source: { type: 'string', enum: ['cache', 'riot'] },
                     players: {
                       type: 'array',
                       items: {
                         type: 'object',
                         properties: {
-                          summonerId: { type: 'string' },
                           puuid: { type: 'string' },
+                          gameName: { type: 'string' },
                           tier: { type: 'string' },
                           rank: { type: 'string' },
                           lp: { type: 'integer', example: 1500 },
@@ -81,21 +91,26 @@ export const swaggerSpec = {
       get: {
         summary: 'Find one-trick players',
         description:
-          'Analyzes top players\' recent matches to identify one-trick-ponies (35%+ games on one champion).',
+          'Identifies OTP players (35%+ games on one champion). Reads from DB if collect has run, otherwise queries Riot API live.',
         tags: ['OTP'],
         parameters: [
           regionParam,
           {
             in: 'query',
             name: 'tier',
-            schema: { type: 'string', enum: ['challenger', 'grandmaster', 'master'], default: 'challenger' },
+            schema: {
+              type: 'string',
+              enum: ['challenger', 'grandmaster', 'master'],
+              default: 'challenger',
+            },
           },
           {
             in: 'query',
             name: 'limit',
-            schema: { type: 'integer', default: 5, maximum: 10 },
-            description: 'Number of top players to analyze',
+            schema: { type: 'integer', default: 20, maximum: 50 },
+            description: 'Number of players to return',
           },
+          refreshParam,
         ],
         responses: {
           '200': {
@@ -108,6 +123,7 @@ export const swaggerSpec = {
                     region: { type: 'string' },
                     tier: { type: 'string' },
                     otpThreshold: { type: 'integer', example: 35 },
+                    source: { type: 'string', enum: ['cache', 'riot'] },
                     players: {
                       type: 'array',
                       items: {
@@ -140,7 +156,7 @@ export const swaggerSpec = {
       get: {
         summary: 'Find top players for a champion',
         description:
-          'Searches Challenger/Grandmaster/Master for players with 50k+ mastery points on a specific champion.',
+          'Searches for players with 50k+ mastery on a champion. Reads from DB cache (30 min TTL), falls back to Riot API using /top mastery endpoint.',
         tags: ['Champions'],
         parameters: [
           {
@@ -151,6 +167,7 @@ export const swaggerSpec = {
             description: 'Champion name (e.g. Yasuo, LeeSin)',
           },
           regionParam,
+          refreshParam,
         ],
         responses: {
           '200': {
@@ -162,6 +179,7 @@ export const swaggerSpec = {
                   properties: {
                     champion: { type: 'string' },
                     region: { type: 'string' },
+                    source: { type: 'string', enum: ['cache', 'riot'] },
                     players: {
                       type: 'array',
                       items: {
@@ -322,21 +340,31 @@ export const swaggerSpec = {
       get: {
         summary: 'Collect player data (cron job)',
         description:
-          'Fetches and stores data for top 10 players in a tier. Requires secret for authorization.',
+          'Main data pipeline. Fetches league standings, account names, top-5 champion mastery, and recent match data. Stores everything in PostgreSQL. Run via cron or manually with secret=manual.',
         tags: ['Collect'],
         parameters: [
           regionParam,
           {
             in: 'query',
             name: 'tier',
-            schema: { type: 'string', enum: ['challenger', 'grandmaster', 'master'], default: 'challenger' },
+            schema: {
+              type: 'string',
+              enum: ['challenger', 'grandmaster', 'master'],
+              default: 'challenger',
+            },
+          },
+          {
+            in: 'query',
+            name: 'limit',
+            schema: { type: 'integer', default: 50, maximum: 200 },
+            description: 'Number of top players to collect',
           },
           {
             in: 'query',
             name: 'secret',
             required: true,
             schema: { type: 'string' },
-            description: 'Cron secret for authorization',
+            description: 'Cron secret for authorization (use "manual" for dev)',
           },
         ],
         responses: {
@@ -351,6 +379,7 @@ export const swaggerSpec = {
                     tier: { type: 'string' },
                     collected: { type: 'integer' },
                     total: { type: 'integer' },
+                    newMatches: { type: 'integer' },
                   },
                 },
               },

@@ -5,6 +5,7 @@ import {
   riotFetch,
   delay,
 } from '../services/riot-client.js'
+import { prisma } from '../prisma.js'
 import type { LeagueList, MatchDto } from '../types/riot.js'
 
 const router = Router()
@@ -26,66 +27,11 @@ interface OtpPlayer {
   otpPercent: number
 }
 
-/**
- * @swagger
- * /api/riot/otp:
- *   get:
- *     summary: Find one-trick players
- *     description: Analyzes top players' recent matches to identify one-trick-ponies (35%+ games on one champion).
- *     tags: [OTP]
- *     parameters:
- *       - in: query
- *         name: region
- *         schema:
- *           type: string
- *           default: euw
- *       - in: query
- *         name: tier
- *         schema:
- *           type: string
- *           enum: [challenger, grandmaster, master]
- *           default: challenger
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           default: 5
- *           maximum: 10
- *         description: Number of top players to analyze
- *     responses:
- *       200:
- *         description: List of OTP players
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 region:
- *                   type: string
- *                 tier:
- *                   type: string
- *                 otpThreshold:
- *                   type: integer
- *                 players:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       puuid:
- *                         type: string
- *                       gameName:
- *                         type: string
- *                       mainChampion:
- *                         type: string
- *                       otpPercent:
- *                         type: integer
- *                       lp:
- *                         type: integer
- */
 router.get('/otp', async (req, res) => {
   const region = (req.query['region'] as string) ?? 'euw'
   const tier = (req.query['tier'] as string) ?? 'challenger'
-  const limit = Math.min(Number(req.query['limit']) || 5, 10)
+  const limit = Math.min(Number(req.query['limit']) || 20, 50)
+  const forceRefresh = req.query['refresh'] === 'true'
 
   if (!VALID_TIERS.includes(tier)) {
     res.status(400).json({
@@ -94,6 +40,51 @@ router.get('/otp', async (req, res) => {
     return
   }
 
+  // Try DB first: players with champion stats from collect
+  if (!forceRefresh) {
+    const dbPlayers = await prisma.player.findMany({
+      where: { region, tier: tier.toUpperCase(), totalGames: { gt: 0 } },
+      include: { champions: { orderBy: { gamesPlayed: 'desc' } } },
+      orderBy: { lp: 'desc' },
+      take: limit,
+    })
+
+    if (dbPlayers.length > 0) {
+      const otpPlayers: OtpPlayer[] = dbPlayers
+        .filter((p) => p.champions.length > 0)
+        .map((p) => {
+          const main = p.champions[0]!
+          const otpPercent = Math.round(
+            (main.gamesPlayed / p.totalGames) * 100,
+          )
+          return {
+            puuid: p.puuid,
+            gameName: p.gameName,
+            tier: p.tier,
+            lp: p.lp,
+            wins: p.wins,
+            losses: p.losses,
+            winRate: p.winRate,
+            mainChampion: main.championName,
+            mainChampionGames: main.gamesPlayed,
+            totalGames: p.totalGames,
+            otpPercent,
+          }
+        })
+        .sort((a, b) => b.otpPercent - a.otpPercent || b.lp - a.lp)
+
+      res.json({
+        region,
+        tier,
+        otpThreshold: OTP_THRESHOLD,
+        source: 'cache',
+        players: otpPlayers,
+      })
+      return
+    }
+  }
+
+  // Fallback: live Riot API
   const platformHost = getPlatformHost(region)
   const regionalHost = getRegionalHost(region)
 
@@ -104,7 +95,7 @@ router.get('/otp', async (req, res) => {
 
   const topPlayers = league.entries
     .sort((a, b) => b.leaguePoints - a.leaguePoints)
-    .slice(0, limit)
+    .slice(0, Math.min(limit, 10)) // Limit live requests
 
   const otpPlayers: OtpPlayer[] = []
 
@@ -114,7 +105,6 @@ router.get('/otp', async (req, res) => {
         regionalHost,
         `/lol/match/v5/matches/by-puuid/${player.puuid}/ids?queue=420&count=5`,
       )
-
       if (matchIds.length === 0) continue
 
       await delay(100)
@@ -190,6 +180,7 @@ router.get('/otp', async (req, res) => {
     region,
     tier,
     otpThreshold: OTP_THRESHOLD,
+    source: 'riot',
     players: otpPlayers,
   })
 })

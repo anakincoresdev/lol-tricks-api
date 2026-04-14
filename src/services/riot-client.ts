@@ -104,25 +104,52 @@ export async function batchRequests<T>(
   return results
 }
 
-// Cache DDragon champion ID mapping in memory
+// DDragon: dynamic version + champion ID cache
 let championIdCache: Record<string, number> | null = null
+let championNameByIdCache: Record<number, string> | null = null
+let ddCacheExpiry = 0
 
 interface DDragonResponse {
   data: Record<string, { key: string; id: string; name: string }>
 }
 
+async function ensureDDragonCache(): Promise<void> {
+  if (championIdCache && Date.now() < ddCacheExpiry) return
+
+  // Fetch latest DDragon version
+  const versionsRes = await fetch(
+    'https://ddragon.leagueoflegends.com/api/versions.json',
+  )
+  const versions = (await versionsRes.json()) as string[]
+  const latestVersion = versions[0]
+
+  const res = await fetch(
+    `https://ddragon.leagueoflegends.com/cdn/${latestVersion}/data/en_US/champion.json`,
+  )
+  const data = (await res.json()) as DDragonResponse
+
+  championIdCache = {}
+  championNameByIdCache = {}
+  for (const champ of Object.values(data.data)) {
+    const numId = parseInt(champ.key, 10)
+    championIdCache[champ.id.toLowerCase()] = numId
+    championNameByIdCache[numId] = champ.id
+  }
+
+  // Cache for 24 hours
+  ddCacheExpiry = Date.now() + 24 * 60 * 60 * 1000
+}
+
 export async function getChampionNumericId(
   championName: string,
 ): Promise<number | null> {
-  if (!championIdCache) {
-    const res = await fetch(
-      'https://ddragon.leagueoflegends.com/cdn/15.7.1/data/en_US/champion.json',
-    )
-    const data = (await res.json()) as DDragonResponse
-    championIdCache = {}
-    for (const champ of Object.values(data.data)) {
-      championIdCache[champ.id.toLowerCase()] = parseInt(champ.key, 10)
-    }
-  }
-  return championIdCache[championName.toLowerCase()] ?? null
+  await ensureDDragonCache()
+  return championIdCache?.[championName.toLowerCase()] ?? null
+}
+
+export async function getChampionNameById(
+  championId: number,
+): Promise<string | null> {
+  await ensureDDragonCache()
+  return championNameByIdCache?.[championId] ?? null
 }

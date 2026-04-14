@@ -7,64 +7,13 @@ const router = Router()
 
 const VALID_TIERS = ['challenger', 'grandmaster', 'master']
 
-/**
- * @swagger
- * /api/riot/league/{tier}:
- *   get:
- *     summary: Get top players by tier
- *     description: Returns top 50 players sorted by LP for a given ranked tier.
- *     tags: [League]
- *     parameters:
- *       - in: path
- *         name: tier
- *         required: true
- *         schema:
- *           type: string
- *           enum: [challenger, grandmaster, master]
- *         description: Ranked tier
- *       - in: query
- *         name: region
- *         schema:
- *           type: string
- *           default: euw
- *         description: Server region (euw, na, kr, etc.)
- *     responses:
- *       200:
- *         description: List of top players
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 tier:
- *                   type: string
- *                 region:
- *                   type: string
- *                 players:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       puuid:
- *                         type: string
- *                       tier:
- *                         type: string
- *                       lp:
- *                         type: integer
- *                       wins:
- *                         type: integer
- *                       losses:
- *                         type: integer
- *                       winRate:
- *                         type: integer
- *                       hotStreak:
- *                         type: boolean
- *       400:
- *         description: Invalid tier
- */
+// Cache freshness: serve from DB if updated within this window
+const CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
+
 router.get('/league/:tier', async (req, res) => {
   const { tier } = req.params
   const region = (req.query['region'] as string) ?? 'euw'
+  const forceRefresh = req.query['refresh'] === 'true'
 
   if (!tier || !VALID_TIERS.includes(tier)) {
     res.status(400).json({
@@ -73,16 +22,52 @@ router.get('/league/:tier', async (req, res) => {
     return
   }
 
-  const host = getPlatformHost(region)
-  const path = `/lol/league/v4/${tier}leagues/by-queue/RANKED_SOLO_5x5`
+  // Try DB first (unless force refresh)
+  if (!forceRefresh) {
+    const dbPlayers = await prisma.player.findMany({
+      where: { region, tier: tier.toUpperCase() },
+      orderBy: { lp: 'desc' },
+      take: 50,
+    })
 
-  const data = await riotFetch<LeagueList>(host, path)
+    if (dbPlayers.length > 0) {
+      const freshest = dbPlayers[0]
+      const isFresh =
+        freshest && Date.now() - freshest.updatedAt.getTime() < CACHE_TTL_MS
+
+      if (isFresh) {
+        res.json({
+          tier: tier.toUpperCase(),
+          region,
+          source: 'cache',
+          players: dbPlayers.map((p) => ({
+            puuid: p.puuid,
+            gameName: p.gameName,
+            tier: p.tier,
+            rank: p.rank,
+            lp: p.lp,
+            wins: p.wins,
+            losses: p.losses,
+            winRate: p.winRate,
+            hotStreak: p.hotStreak,
+          })),
+        })
+        return
+      }
+    }
+  }
+
+  // Fallback: fetch from Riot API
+  const host = getPlatformHost(region)
+  const data = await riotFetch<LeagueList>(
+    host,
+    `/lol/league/v4/${tier}leagues/by-queue/RANKED_SOLO_5x5`,
+  )
 
   const sorted = data.entries
     .sort((a, b) => b.leaguePoints - a.leaguePoints)
     .slice(0, 50)
     .map((entry) => ({
-      summonerId: entry.summonerId,
       puuid: entry.puuid,
       tier: data.tier,
       rank: entry.rank,
@@ -93,35 +78,42 @@ router.get('/league/:tier', async (req, res) => {
       hotStreak: entry.hotStreak,
     }))
 
-  // Cache players in DB
-  for (const player of sorted) {
-    await prisma.player.upsert({
-      where: { puuid_region: { puuid: player.puuid, region } },
-      update: {
-        tier: player.tier,
-        rank: player.rank,
-        lp: player.lp,
-        wins: player.wins,
-        losses: player.losses,
-        winRate: player.winRate,
-        hotStreak: player.hotStreak,
-      },
-      create: {
-        puuid: player.puuid,
-        gameName: 'Unknown',
-        region,
-        tier: player.tier,
-        rank: player.rank,
-        lp: player.lp,
-        wins: player.wins,
-        losses: player.losses,
-        winRate: player.winRate,
-        hotStreak: player.hotStreak,
-      },
-    })
-  }
+  // Update DB in background (don't block response)
+  void Promise.all(
+    sorted.map((player) =>
+      prisma.player.upsert({
+        where: { puuid_region: { puuid: player.puuid, region } },
+        update: {
+          tier: player.tier,
+          rank: player.rank,
+          lp: player.lp,
+          wins: player.wins,
+          losses: player.losses,
+          winRate: player.winRate,
+          hotStreak: player.hotStreak,
+        },
+        create: {
+          puuid: player.puuid,
+          gameName: 'Unknown',
+          region,
+          tier: player.tier,
+          rank: player.rank,
+          lp: player.lp,
+          wins: player.wins,
+          losses: player.losses,
+          winRate: player.winRate,
+          hotStreak: player.hotStreak,
+        },
+      }),
+    ),
+  )
 
-  res.json({ tier: data.tier, region, players: sorted })
+  res.json({
+    tier: data.tier,
+    region,
+    source: 'riot',
+    players: sorted,
+  })
 })
 
 export default router
