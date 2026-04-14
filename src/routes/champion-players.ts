@@ -6,7 +6,6 @@ import {
   batchRequests,
   delay,
   getChampionNumericId,
-  getChampionNameById,
 } from '../services/riot-client.js'
 import { prisma } from '../prisma.js'
 import type {
@@ -18,8 +17,8 @@ import type {
 
 const router = Router()
 
-const MIN_MASTERY_POINTS = 50_000
-const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
+const MIN_MASTERY_POINTS = 10_000 // Lowered from 50k — catches more players
+const CACHE_TTL_MS = 30 * 60 * 1000
 
 interface ChampionPlayerResult {
   puuid: string
@@ -50,7 +49,7 @@ async function getChampionPlayersForRegion(
         updatedAt: { gte: new Date(Date.now() - CACHE_TTL_MS) },
       },
       orderBy: { masteryPoints: 'desc' },
-      take: 20,
+      take: 50,
     })
 
     if (cachedMasteries.length > 0) {
@@ -93,6 +92,7 @@ async function getChampionPlayersForRegion(
   const platformHost = getPlatformHost(region)
   const regionalHost = getRegionalHost(region)
 
+  // Fetch ALL players from all 3 apex tiers
   const tiers = ['challenger', 'grandmaster', 'master'] as const
   const leagueResults = await Promise.all(
     tiers.map((t) =>
@@ -110,20 +110,24 @@ async function getChampionPlayersForRegion(
     }
   }
   allEntries.sort((a, b) => b.leaguePoints - a.leaguePoints)
-  const topPlayers = allEntries.slice(0, 50)
+
+  // Scan up to 300 players (all of Challenger + top Grandmaster)
+  const topPlayers = allEntries.slice(0, 300)
 
   await delay(200)
 
+  // Query mastery for the SPECIFIC champion, not top-5
+  // This catches every player who has ever played this champion
   const masteryResults = await batchRequests(
     topPlayers.map(
       (player) => () =>
-        riotFetch<ChampionMasteryDto[]>(
+        riotFetch<ChampionMasteryDto>(
           platformHost,
-          `/lol/champion-mastery/v4/champion-masteries/by-puuid/${player.puuid}/top?count=5`,
-        ),
+          `/lol/champion-mastery/v4/champion-masteries/by-puuid/${player.puuid}/by-champion/${championNumericId}`,
+        ).catch(() => null as unknown as ChampionMasteryDto),
     ),
     10,
-    250,
+    300,
   )
 
   const matchedPlayers: {
@@ -132,51 +136,46 @@ async function getChampionPlayersForRegion(
   }[] = []
 
   for (let i = 0; i < topPlayers.length; i++) {
-    const masteries = masteryResults[i]
+    const mastery = masteryResults[i]
     const entry = topPlayers[i]
-    if (!entry || !masteries) continue
+    if (!entry || !mastery || !mastery.championPoints) continue
 
-    const championMastery = masteries.find(
-      (m) => m.championId === championNumericId,
-    )
-    if (championMastery && championMastery.championPoints >= MIN_MASTERY_POINTS) {
-      matchedPlayers.push({ entry, mastery: championMastery })
+    if (mastery.championPoints >= MIN_MASTERY_POINTS) {
+      matchedPlayers.push({ entry, mastery })
     }
 
-    // Cache all top-5 masteries in DB
-    for (const m of masteries) {
-      const champName = await getChampionNameById(m.championId)
-      if (!champName) continue
-      void prisma.championMastery.upsert({
-        where: {
-          puuid_championId_region: {
-            puuid: entry.puuid,
-            championId: m.championId,
-            region,
-          },
-        },
-        update: {
-          championName: champName,
-          masteryPoints: m.championPoints,
-          masteryLevel: m.championLevel,
-        },
-        create: {
+    // Cache in DB
+    void prisma.championMastery.upsert({
+      where: {
+        puuid_championId_region: {
           puuid: entry.puuid,
-          championId: m.championId,
-          championName: champName,
-          masteryPoints: m.championPoints,
-          masteryLevel: m.championLevel,
+          championId: championNumericId,
           region,
         },
-      })
-    }
+      },
+      update: {
+        championName: champion,
+        masteryPoints: mastery.championPoints,
+        masteryLevel: mastery.championLevel,
+      },
+      create: {
+        puuid: entry.puuid,
+        championId: championNumericId,
+        championName: champion,
+        masteryPoints: mastery.championPoints,
+        masteryLevel: mastery.championLevel,
+        region,
+      },
+    })
   }
 
-  matchedPlayers.sort((a, b) => b.entry.leaguePoints - a.entry.leaguePoints)
-  const toResolve = matchedPlayers.slice(0, 20)
+  // Sort by mastery points descending
+  matchedPlayers.sort((a, b) => b.mastery.championPoints - a.mastery.championPoints)
+  const toResolve = matchedPlayers.slice(0, 50)
 
   await delay(200)
 
+  // Fetch display names
   const accountResults = await batchRequests(
     toResolve.map(
       ({ entry }) =>
@@ -298,19 +297,18 @@ router.get('/champion-players/multi', async (req, res) => {
       const { region, source, players } = result.value
       byRegion[region] = { source, players }
     } else {
-      // Extract region from error context
       const idx = results.indexOf(result)
       const region = regions[idx] ?? 'unknown'
-      errors[region] = result.reason instanceof Error
-        ? result.reason.message
-        : 'Unknown error'
+      errors[region] =
+        result.reason instanceof Error
+          ? result.reason.message
+          : 'Unknown error'
     }
   }
 
-  // Merge all players sorted by LP
   const allPlayers = Object.values(byRegion)
     .flatMap((r) => r.players)
-    .sort((a, b) => b.lp - a.lp)
+    .sort((a, b) => b.masteryPoints - a.masteryPoints)
 
   res.json({
     champion,
