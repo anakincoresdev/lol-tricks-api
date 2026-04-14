@@ -27,6 +27,20 @@ interface PlayerRuneInfo {
   secondaryStyle: number
 }
 
+// Normalised lane identifier matching frontend ROLES config.
+export type PlayerPosition =
+  | 'top'
+  | 'jungle'
+  | 'mid'
+  | 'adc'
+  | 'support'
+  | null
+
+interface PlayerMatchMeta {
+  runes: PlayerRuneInfo | null
+  position: PlayerPosition
+}
+
 interface ChampionPlayerResult {
   puuid: string
   gameName: string
@@ -40,16 +54,34 @@ interface ChampionPlayerResult {
   masteryPoints: number
   masteryLevel: number
   runes: PlayerRuneInfo | null
+  position: PlayerPosition
 }
 
-async function fetchRunesForPlayers(
+function mapTeamPosition(raw: string | undefined): PlayerPosition {
+  switch ((raw ?? '').toUpperCase()) {
+    case 'TOP':
+      return 'top'
+    case 'JUNGLE':
+      return 'jungle'
+    case 'MIDDLE':
+      return 'mid'
+    case 'BOTTOM':
+      return 'adc'
+    case 'UTILITY':
+      return 'support'
+    default:
+      return null
+  }
+}
+
+async function fetchPlayerMatchMeta(
   players: { puuid: string }[],
   regionalHost: string,
   max: number,
-): Promise<Map<string, PlayerRuneInfo>> {
-  const runeMap = new Map<string, PlayerRuneInfo>()
+): Promise<Map<string, PlayerMatchMeta>> {
+  const metaMap = new Map<string, PlayerMatchMeta>()
   const slice = players.slice(0, max)
-  if (slice.length === 0) return runeMap
+  if (slice.length === 0) return metaMap
 
   const recentIds = await batchRequests(
     slice.map(
@@ -72,7 +104,7 @@ async function fetchRunesForPlayers(
     }
   })
 
-  if (matchSpecs.length === 0) return runeMap
+  if (matchSpecs.length === 0) return metaMap
 
   await delay(150)
 
@@ -94,27 +126,33 @@ async function fetchRunesForPlayers(
     const spec = matchSpecs[idx]
     if (!spec) return
     const me = match.info.participants.find((p) => p.puuid === spec.puuid)
-    if (!me || !me.perks || me.perks.styles.length === 0) return
+    if (!me) return
 
-    const primary =
-      me.perks.styles.find((s) => s.description === 'primaryStyle') ??
-      me.perks.styles[0]
-    const secondary =
-      me.perks.styles.find((s) => s.description === 'subStyle') ??
-      me.perks.styles[1]
-    if (!primary) return
+    const position = mapTeamPosition(me.teamPosition)
 
-    const keystonePerk = primary.selections[0]?.perk
-    if (!keystonePerk) return
+    let runes: PlayerRuneInfo | null = null
+    if (me.perks && me.perks.styles.length > 0) {
+      const primary =
+        me.perks.styles.find((s) => s.description === 'primaryStyle') ??
+        me.perks.styles[0]
+      const secondary =
+        me.perks.styles.find((s) => s.description === 'subStyle') ??
+        me.perks.styles[1]
+      const keystonePerk = primary?.selections[0]?.perk
 
-    runeMap.set(spec.puuid, {
-      keystone: keystonePerk,
-      primaryStyle: primary.style,
-      secondaryStyle: secondary?.style ?? 0,
-    })
+      if (primary && keystonePerk) {
+        runes = {
+          keystone: keystonePerk,
+          primaryStyle: primary.style,
+          secondaryStyle: secondary?.style ?? 0,
+        }
+      }
+    }
+
+    metaMap.set(spec.puuid, { runes, position })
   })
 
-  return runeMap
+  return metaMap
 }
 
 async function getChampionPlayersForRegion(
@@ -165,6 +203,7 @@ async function getChampionPlayersForRegion(
                 masteryPoints: m.masteryPoints,
                 masteryLevel: m.masteryLevel,
                 runes: null as PlayerRuneInfo | null,
+                position: null as PlayerPosition,
               }
             : null
         })
@@ -173,9 +212,11 @@ async function getChampionPlayersForRegion(
 
       if (base.length > 0) {
         if (withRunes) {
-          const runeMap = await fetchRunesForPlayers(base, regionalHost, 15)
+          const metaMap = await fetchPlayerMatchMeta(base, regionalHost, 15)
           for (const p of base) {
-            p.runes = runeMap.get(p.puuid) ?? null
+            const meta = metaMap.get(p.puuid)
+            p.runes = meta?.runes ?? null
+            p.position = meta?.position ?? null
           }
         }
         return { source: 'cache', players: base }
@@ -301,13 +342,16 @@ async function getChampionPlayersForRegion(
       masteryPoints: mastery.championPoints,
       masteryLevel: mastery.championLevel,
       runes: null,
+      position: null,
     })
   }
 
   if (withRunes && base.length > 0) {
-    const runeMap = await fetchRunesForPlayers(base, regionalHost, 15)
+    const metaMap = await fetchPlayerMatchMeta(base, regionalHost, 15)
     for (const p of base) {
-      p.runes = runeMap.get(p.puuid) ?? null
+      const meta = metaMap.get(p.puuid)
+      p.runes = meta?.runes ?? null
+      p.position = meta?.position ?? null
     }
   }
 
