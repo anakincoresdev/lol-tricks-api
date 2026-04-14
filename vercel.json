@@ -2,17 +2,60 @@
   "version": 2,
   "buildCommand": "npx prisma generate && npx tsc",
   "outputDirectory": "dist",
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api" }
-  ],
+  "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
+  "functions": {
+    "api/index.ts": {
+      "maxDuration": 300
+    }
+  },
   "crons": [
     {
+      "path": "/api/riot/collect?region=kr&tier=challenger",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=kr&tier=grandmaster",
+      "schedule": "20 2 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=kr&tier=master&limit=100",
+      "schedule": "40 2 * * *"
+    },
+    {
       "path": "/api/riot/collect?region=euw&tier=challenger",
-      "schedule": "0 6 * * *"
+      "schedule": "0 4 * * *"
     },
     {
       "path": "/api/riot/collect?region=euw&tier=grandmaster",
-      "schedule": "0 18 * * *"
+      "schedule": "20 4 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=euw&tier=master&limit=100",
+      "schedule": "40 4 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=na&tier=challenger",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=na&tier=grandmaster",
+      "schedule": "20 6 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=na&tier=master&limit=100",
+      "schedule": "40 6 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=eune&tier=challenger",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=br&tier=challenger",
+      "schedule": "20 8 * * *"
+    },
+    {
+      "path": "/api/riot/collect?region=jp&tier=challenger",
+      "schedule": "40 8 * * *"
     }
   ]
 }

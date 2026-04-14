@@ -19,7 +19,9 @@ import type {
 const router = Router()
 
 const MIN_MASTERY_POINTS = 10_000 // Lowered from 50k — catches more players
-const CACHE_TTL_MS = 30 * 60 * 1000
+// Cache TTL covers a full daily cron cycle with some slack, so ranking requests
+// always hit the DB and never fall back to Riot inside a user request.
+const CACHE_TTL_MS = 25 * 60 * 60 * 1000
 
 interface PlayerRuneInfo {
   keystone: number
@@ -72,6 +74,55 @@ function mapTeamPosition(raw: string | undefined): PlayerPosition {
     default:
       return null
   }
+}
+
+// Pull runes + position out of already-stored match participants. Used in the
+// hot path so user requests never wait on Riot.
+async function fetchPlayerMatchMetaFromDb(
+  players: { puuid: string }[],
+  championName: string,
+): Promise<Map<string, PlayerMatchMeta>> {
+  const metaMap = new Map<string, PlayerMatchMeta>()
+  if (players.length === 0) return metaMap
+
+  const puuids = players.map((p) => p.puuid)
+  const rows = await prisma.matchParticipant.findMany({
+    where: { puuid: { in: puuids }, championName },
+    include: { match: { select: { gameCreation: true } } },
+  })
+
+  rows.sort(
+    (a, b) => b.match.gameCreation.getTime() - a.match.gameCreation.getTime(),
+  )
+
+  for (const row of rows) {
+    if (metaMap.has(row.puuid)) continue
+
+    const rawRunes = row.runes as unknown as {
+      style: number
+      runes: number[]
+    }[]
+    let runes: PlayerRuneInfo | null = null
+    if (Array.isArray(rawRunes) && rawRunes.length > 0) {
+      const primary = rawRunes[0]
+      const secondary = rawRunes[1]
+      const keystone = primary?.runes?.[0]
+      if (primary && keystone) {
+        runes = {
+          keystone,
+          primaryStyle: primary.style,
+          secondaryStyle: secondary?.style ?? 0,
+        }
+      }
+    }
+
+    metaMap.set(row.puuid, {
+      runes,
+      position: mapTeamPosition(row.position),
+    })
+  }
+
+  return metaMap
 }
 
 async function fetchPlayerMatchMeta(
@@ -161,6 +212,7 @@ async function getChampionPlayersForRegion(
   region: string,
   forceRefresh: boolean,
   withRunes: boolean,
+  cacheOnly: boolean,
 ): Promise<{ source: 'cache' | 'riot'; players: ChampionPlayerResult[] }> {
   const regionalHost = getRegionalHost(region)
 
@@ -212,7 +264,9 @@ async function getChampionPlayersForRegion(
 
       if (base.length > 0) {
         if (withRunes) {
-          const metaMap = await fetchPlayerMatchMeta(base, regionalHost, 15)
+          const metaMap = cacheOnly
+            ? await fetchPlayerMatchMetaFromDb(base, champion)
+            : await fetchPlayerMatchMeta(base, regionalHost, 15)
           for (const p of base) {
             const meta = metaMap.get(p.puuid)
             p.runes = meta?.runes ?? null
@@ -222,6 +276,11 @@ async function getChampionPlayersForRegion(
         return { source: 'cache', players: base }
       }
     }
+  }
+
+  // Cache miss: short-circuit in cacheOnly mode so user requests stay fast.
+  if (cacheOnly) {
+    return { source: 'cache', players: [] }
   }
 
   // Fallback: Riot API
@@ -364,6 +423,9 @@ router.get('/champion-players', async (req, res) => {
   const region = (req.query['region'] as string) ?? 'euw'
   const forceRefresh = req.query['refresh'] === 'true'
   const withRunes = req.query['runes'] !== 'false'
+  // Default to cache-only: user requests are served from DB populated by cron.
+  // Pass ?cacheOnly=false to force a live Riot fetch (slow, may time out).
+  const cacheOnly = req.query['cacheOnly'] !== 'false'
 
   if (!champion) {
     res.status(400).json({ error: 'Champion parameter is required.' })
@@ -382,6 +444,7 @@ router.get('/champion-players', async (req, res) => {
     region,
     forceRefresh,
     withRunes,
+    cacheOnly,
   )
 
   res.json({ champion, region, ...result })
@@ -393,6 +456,7 @@ router.get('/champion-players/multi', async (req, res) => {
   const regionsParam = (req.query['regions'] as string) ?? ''
   const forceRefresh = req.query['refresh'] === 'true'
   const withRunes = req.query['runes'] !== 'false'
+  const cacheOnly = req.query['cacheOnly'] !== 'false'
 
   if (!champion) {
     res.status(400).json({ error: 'Champion parameter is required.' })
@@ -427,6 +491,7 @@ router.get('/champion-players/multi', async (req, res) => {
         region,
         forceRefresh,
         withRunes,
+        cacheOnly,
       ).then((result) => ({ region, ...result })),
     ),
   )
