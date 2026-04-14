@@ -21,23 +21,26 @@ const router = Router()
 const MIN_MASTERY_POINTS = 50_000
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
-router.get('/champion-players', async (req, res) => {
-  const champion = (req.query['champion'] as string) ?? ''
-  const region = (req.query['region'] as string) ?? 'euw'
-  const forceRefresh = req.query['refresh'] === 'true'
+interface ChampionPlayerResult {
+  puuid: string
+  gameName: string
+  region: string
+  tier: string
+  lp: number
+  wins: number
+  losses: number
+  winRate: number
+  masteryPoints: number
+  masteryLevel: number
+}
 
-  if (!champion) {
-    res.status(400).json({ error: 'Champion parameter is required.' })
-    return
-  }
-
-  const championNumericId = await getChampionNumericId(champion)
-  if (!championNumericId) {
-    res.status(400).json({ error: `Unknown champion: ${champion}` })
-    return
-  }
-
-  // Try DB first: find players with mastery on this champion
+async function getChampionPlayersForRegion(
+  champion: string,
+  championNumericId: number,
+  region: string,
+  forceRefresh: boolean,
+): Promise<{ source: 'cache' | 'riot'; players: ChampionPlayerResult[] }> {
+  // Try DB first
   if (!forceRefresh) {
     const cachedMasteries = await prisma.championMastery.findMany({
       where: {
@@ -51,14 +54,13 @@ router.get('/champion-players', async (req, res) => {
     })
 
     if (cachedMasteries.length > 0) {
-      // Get player info for these puuids
-      const players = await prisma.player.findMany({
+      const dbPlayers = await prisma.player.findMany({
         where: {
           puuid: { in: cachedMasteries.map((m) => m.puuid) },
           region,
         },
       })
-      const playerMap = new Map(players.map((p) => [p.puuid, p]))
+      const playerMap = new Map(dbPlayers.map((p) => [p.puuid, p]))
 
       const result = cachedMasteries
         .map((m) => {
@@ -67,6 +69,7 @@ router.get('/champion-players', async (req, res) => {
             ? {
                 puuid: m.puuid,
                 gameName: player.gameName,
+                region,
                 tier: player.tier,
                 lp: player.lp,
                 wins: player.wins,
@@ -77,12 +80,11 @@ router.get('/champion-players', async (req, res) => {
               }
             : null
         })
-        .filter(Boolean)
-        .sort((a, b) => b!.lp - a!.lp)
+        .filter((p): p is ChampionPlayerResult => p !== null)
+        .sort((a, b) => b.lp - a.lp)
 
       if (result.length > 0) {
-        res.json({ champion, region, source: 'cache', players: result })
-        return
+        return { source: 'cache', players: result }
       }
     }
   }
@@ -112,7 +114,6 @@ router.get('/champion-players', async (req, res) => {
 
   await delay(200)
 
-  // Use /top?count=5 instead of per-champion query — fewer wasted requests
   const masteryResults = await batchRequests(
     topPlayers.map(
       (player) => () =>
@@ -189,7 +190,7 @@ router.get('/champion-players', async (req, res) => {
     250,
   )
 
-  const players = []
+  const players: ChampionPlayerResult[] = []
   for (let i = 0; i < toResolve.length; i++) {
     const item = toResolve[i]
     if (!item) continue
@@ -202,6 +203,7 @@ router.get('/champion-players', async (req, res) => {
     players.push({
       puuid: entry.puuid,
       gameName,
+      region,
       tier: entry.tierName,
       lp: entry.leaguePoints,
       wins: entry.wins,
@@ -212,7 +214,111 @@ router.get('/champion-players', async (req, res) => {
     })
   }
 
-  res.json({ champion, region, source: 'riot', players })
+  return { source: 'riot', players }
+}
+
+// Single region
+router.get('/champion-players', async (req, res) => {
+  const champion = (req.query['champion'] as string) ?? ''
+  const region = (req.query['region'] as string) ?? 'euw'
+  const forceRefresh = req.query['refresh'] === 'true'
+
+  if (!champion) {
+    res.status(400).json({ error: 'Champion parameter is required.' })
+    return
+  }
+
+  const championNumericId = await getChampionNumericId(champion)
+  if (!championNumericId) {
+    res.status(400).json({ error: `Unknown champion: ${champion}` })
+    return
+  }
+
+  const result = await getChampionPlayersForRegion(
+    champion,
+    championNumericId,
+    region,
+    forceRefresh,
+  )
+
+  res.json({ champion, region, ...result })
+})
+
+// Multi-region: ?champion=Ahri&regions=euw,na,kr
+router.get('/champion-players/multi', async (req, res) => {
+  const champion = (req.query['champion'] as string) ?? ''
+  const regionsParam = (req.query['regions'] as string) ?? ''
+  const forceRefresh = req.query['refresh'] === 'true'
+
+  if (!champion) {
+    res.status(400).json({ error: 'Champion parameter is required.' })
+    return
+  }
+
+  if (!regionsParam) {
+    res.status(400).json({
+      error: 'Regions parameter is required. Example: regions=euw,na,kr',
+    })
+    return
+  }
+
+  const championNumericId = await getChampionNumericId(champion)
+  if (!championNumericId) {
+    res.status(400).json({ error: `Unknown champion: ${champion}` })
+    return
+  }
+
+  const regions = regionsParam.split(',').map((r) => r.trim().toLowerCase())
+
+  if (regions.length > 11) {
+    res.status(400).json({ error: 'Maximum 11 regions allowed.' })
+    return
+  }
+
+  // Fetch all regions in parallel
+  const results = await Promise.allSettled(
+    regions.map((region) =>
+      getChampionPlayersForRegion(
+        champion,
+        championNumericId,
+        region,
+        forceRefresh,
+      ).then((result) => ({ region, ...result })),
+    ),
+  )
+
+  const byRegion: Record<
+    string,
+    { source: 'cache' | 'riot'; players: ChampionPlayerResult[] }
+  > = {}
+  const errors: Record<string, string> = {}
+
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      const { region, source, players } = result.value
+      byRegion[region] = { source, players }
+    } else {
+      // Extract region from error context
+      const idx = results.indexOf(result)
+      const region = regions[idx] ?? 'unknown'
+      errors[region] = result.reason instanceof Error
+        ? result.reason.message
+        : 'Unknown error'
+    }
+  }
+
+  // Merge all players sorted by LP
+  const allPlayers = Object.values(byRegion)
+    .flatMap((r) => r.players)
+    .sort((a, b) => b.lp - a.lp)
+
+  res.json({
+    champion,
+    regions,
+    byRegion,
+    allPlayers,
+    ...(Object.keys(errors).length > 0 ? { errors } : {}),
+  })
 })
 
 export default router

@@ -154,9 +154,9 @@ export const swaggerSpec = {
 
     '/api/riot/champion-players': {
       get: {
-        summary: 'Find top players for a champion',
+        summary: 'Find top players for a champion (single region)',
         description:
-          'Searches for players with 50k+ mastery on a champion. Reads from DB cache (30 min TTL), falls back to Riot API using /top mastery endpoint.',
+          'Searches for players with 50k+ mastery on a champion in one region. Reads from DB cache (30 min TTL), falls back to Riot API.',
         tags: ['Champions'],
         parameters: [
           {
@@ -187,6 +187,7 @@ export const swaggerSpec = {
                         properties: {
                           puuid: { type: 'string' },
                           gameName: { type: 'string', example: 'Player#EUW' },
+                          region: { type: 'string' },
                           tier: { type: 'string' },
                           lp: { type: 'integer' },
                           wins: { type: 'integer' },
@@ -203,6 +204,83 @@ export const swaggerSpec = {
             },
           },
           '400': { description: 'Missing or unknown champion' },
+        },
+      },
+    },
+
+    '/api/riot/champion-players/multi': {
+      get: {
+        summary: 'Find top players for a champion across multiple regions',
+        description:
+          'Same as /champion-players but queries multiple regions in parallel. Returns results grouped by region and a merged allPlayers array sorted by LP.',
+        tags: ['Champions'],
+        parameters: [
+          {
+            in: 'query',
+            name: 'champion',
+            required: true,
+            schema: { type: 'string' },
+            description: 'Champion name (e.g. Yasuo, LeeSin)',
+          },
+          {
+            in: 'query',
+            name: 'regions',
+            required: true,
+            schema: { type: 'string' },
+            description: 'Comma-separated regions (e.g. euw,na,kr). Max 11.',
+          },
+          refreshParam,
+        ],
+        responses: {
+          '200': {
+            description: 'Multi-region champion mains',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    champion: { type: 'string' },
+                    regions: { type: 'array', items: { type: 'string' } },
+                    byRegion: {
+                      type: 'object',
+                      description: 'Results keyed by region',
+                      additionalProperties: {
+                        type: 'object',
+                        properties: {
+                          source: { type: 'string', enum: ['cache', 'riot'] },
+                          players: { type: 'array', items: { type: 'object' } },
+                        },
+                      },
+                    },
+                    allPlayers: {
+                      type: 'array',
+                      description: 'All players from all regions merged and sorted by LP',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          puuid: { type: 'string' },
+                          gameName: { type: 'string' },
+                          region: { type: 'string' },
+                          tier: { type: 'string' },
+                          lp: { type: 'integer' },
+                          wins: { type: 'integer' },
+                          losses: { type: 'integer' },
+                          winRate: { type: 'integer' },
+                          masteryPoints: { type: 'integer' },
+                          masteryLevel: { type: 'integer' },
+                        },
+                      },
+                    },
+                    errors: {
+                      type: 'object',
+                      description: 'Errors per region (only present if any region failed)',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'Missing champion or regions' },
         },
       },
     },
