@@ -18,10 +18,9 @@ import type {
 
 const router = Router()
 
-const MIN_MASTERY_POINTS = 10_000 // Lowered from 50k — catches more players
-// Cache TTL covers a full daily cron cycle with some slack, so ranking requests
-// always hit the DB and never fall back to Riot inside a user request.
-const CACHE_TTL_MS = 25 * 60 * 60 * 1000
+// Minimum mastery points we accept when we do hit Riot for a fresh fetch (used
+// only in the non-cacheOnly fallback path).
+const MIN_MASTERY_POINTS = 10_000
 
 interface PlayerRuneInfo {
   keystone: number
@@ -216,65 +215,67 @@ async function getChampionPlayersForRegion(
 ): Promise<{ source: 'cache' | 'riot'; players: ChampionPlayerResult[] }> {
   const regionalHost = getRegionalHost(region)
 
-  // Try DB first
+  // Try DB first. We join PlayerChampion (how many games the player actually
+  // played on this champion) with Player (rank, LP, win-rate) and optionally
+  // with ChampionMastery for mastery points/level display. This gives us far
+  // better coverage than relying on mastery alone.
   if (!forceRefresh) {
-    const cachedMasteries = await prisma.championMastery.findMany({
+    const championRows = await prisma.playerChampion.findMany({
       where: {
-        championId: championNumericId,
-        region,
-        masteryPoints: { gte: MIN_MASTERY_POINTS },
-        updatedAt: { gte: new Date(Date.now() - CACHE_TTL_MS) },
+        championName: champion,
+        gamesPlayed: { gte: 1 },
+        player: { region },
       },
-      orderBy: { masteryPoints: 'desc' },
+      include: { player: true },
+      orderBy: { gamesPlayed: 'desc' },
       take: 50,
     })
 
-    if (cachedMasteries.length > 0) {
-      const dbPlayers = await prisma.player.findMany({
+    if (championRows.length > 0) {
+      const puuids = championRows.map((r) => r.player.puuid)
+
+      const masteries = await prisma.championMastery.findMany({
         where: {
-          puuid: { in: cachedMasteries.map((m) => m.puuid) },
+          championId: championNumericId,
           region,
+          puuid: { in: puuids },
         },
       })
-      const playerMap = new Map(dbPlayers.map((p) => [p.puuid, p]))
+      const masteryByPuuid = new Map(masteries.map((m) => [m.puuid, m]))
 
-      const base = cachedMasteries
-        .map((m) => {
-          const player = playerMap.get(m.puuid)
-          return player
-            ? {
-                puuid: m.puuid,
-                gameName: player.gameName,
-                region,
-                tier: player.tier,
-                rank: player.rank ?? 'I',
-                lp: player.lp,
-                wins: player.wins,
-                losses: player.losses,
-                winRate: player.winRate,
-                masteryPoints: m.masteryPoints,
-                masteryLevel: m.masteryLevel,
-                runes: null as PlayerRuneInfo | null,
-                position: null as PlayerPosition,
-              }
-            : null
-        })
-        .filter((p): p is ChampionPlayerResult => p !== null)
-        .sort((a, b) => b.lp - a.lp)
-
-      if (base.length > 0) {
-        if (withRunes) {
-          const metaMap = cacheOnly
-            ? await fetchPlayerMatchMetaFromDb(base, champion)
-            : await fetchPlayerMatchMeta(base, regionalHost, 15)
-          for (const p of base) {
-            const meta = metaMap.get(p.puuid)
-            p.runes = meta?.runes ?? null
-            p.position = meta?.position ?? null
-          }
+      const base: ChampionPlayerResult[] = championRows.map((row) => {
+        const player = row.player
+        const mastery = masteryByPuuid.get(player.puuid)
+        return {
+          puuid: player.puuid,
+          gameName: player.gameName,
+          region,
+          tier: player.tier,
+          rank: player.rank ?? 'I',
+          lp: player.lp,
+          wins: player.wins,
+          losses: player.losses,
+          winRate: player.winRate,
+          masteryPoints: mastery?.masteryPoints ?? 0,
+          masteryLevel: mastery?.masteryLevel ?? 0,
+          runes: null,
+          position: null,
         }
-        return { source: 'cache', players: base }
+      })
+
+      base.sort((a, b) => b.lp - a.lp)
+
+      if (withRunes) {
+        const metaMap = cacheOnly
+          ? await fetchPlayerMatchMetaFromDb(base, champion)
+          : await fetchPlayerMatchMeta(base, regionalHost, 15)
+        for (const p of base) {
+          const meta = metaMap.get(p.puuid)
+          p.runes = meta?.runes ?? null
+          p.position = meta?.position ?? null
+        }
       }
+      return { source: 'cache', players: base }
     }
   }
 
