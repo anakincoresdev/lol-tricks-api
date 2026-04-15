@@ -85,13 +85,14 @@ router.get('/collect', async (req, res) => {
 
   await delay(200)
 
-  // 4. Fetch match IDs in batches
+  // 4. Fetch match IDs in batches — grab 20 recent ranked games per player so
+  // PlayerChampion stats reflect real mains, not just the last 5 games.
   const matchIdResults = await batchRequests(
     topPlayers.map(
       (player) => () =>
         riotFetch<string[]>(
           regionalHost,
-          `/lol/match/v5/matches/by-puuid/${player.puuid}/ids?queue=420&count=10`,
+          `/lol/match/v5/matches/by-puuid/${player.puuid}/ids?queue=420&count=20`,
         ),
     ),
     5,
@@ -105,7 +106,7 @@ router.get('/collect', async (req, res) => {
   for (let i = 0; i < topPlayers.length; i++) {
     const matchIds = matchIdResults[i]
     if (!matchIds) continue
-    const ids = matchIds.slice(0, 5)
+    const ids = matchIds.slice(0, 20)
     playerMatchMap.set(i, ids)
     for (const id of ids) allMatchIds.add(id)
   }
@@ -187,37 +188,30 @@ router.get('/collect', async (req, res) => {
       ? `${account.gameName}#${account.tagLine}`
       : 'Unknown'
 
-    // Count champions from matches
+    // Count champions only from matches NEW in this run. Matches we already
+    // stored in a previous collect were already counted then, so re-counting
+    // them here would double-count as we increment below.
     const champions: Record<string, number> = {}
-    let totalGames = 0
+    let newGames = 0
     const matchIds = playerMatchMap.get(i) ?? []
 
     for (const matchId of matchIds) {
-      // Check new matches first, then DB
       const match = matchDetailMap.get(matchId)
-      if (match) {
-        const participant = match.info.participants.find(
-          (p) => p.puuid === player.puuid,
-        )
-        if (participant) {
-          champions[participant.championName] =
-            (champions[participant.championName] ?? 0) + 1
-          totalGames++
-        }
-      } else {
-        // Match already in DB — query participant
-        const dbParticipant = await prisma.matchParticipant.findFirst({
-          where: { puuid: player.puuid, match: { matchId } },
-        })
-        if (dbParticipant) {
-          champions[dbParticipant.championName] =
-            (champions[dbParticipant.championName] ?? 0) + 1
-          totalGames++
-        }
+      if (!match) continue
+      const participant = match.info.participants.find(
+        (p) => p.puuid === player.puuid,
+      )
+      if (participant) {
+        champions[participant.championName] =
+          (champions[participant.championName] ?? 0) + 1
+        newGames++
       }
     }
 
-    // Upsert player
+    // Upsert player — accumulate totalGames across runs.
+    const winRate = Math.round(
+      (player.wins / (player.wins + player.losses)) * 100,
+    )
     const dbPlayer = await prisma.player.upsert({
       where: { puuid_region: { puuid: player.puuid, region } },
       update: {
@@ -226,11 +220,9 @@ router.get('/collect', async (req, res) => {
         lp: player.leaguePoints,
         wins: player.wins,
         losses: player.losses,
-        winRate: Math.round(
-          (player.wins / (player.wins + player.losses)) * 100,
-        ),
+        winRate,
         hotStreak: player.hotStreak,
-        totalGames,
+        totalGames: { increment: newGames },
       },
       create: {
         puuid: player.puuid,
@@ -240,21 +232,20 @@ router.get('/collect', async (req, res) => {
         lp: player.leaguePoints,
         wins: player.wins,
         losses: player.losses,
-        winRate: Math.round(
-          (player.wins / (player.wins + player.losses)) * 100,
-        ),
+        winRate,
         hotStreak: player.hotStreak,
-        totalGames,
+        totalGames: newGames,
       },
     })
 
-    // Upsert champion play stats
+    // Increment champion play stats so repeated runs build a richer picture
+    // of each player's real pool instead of overwriting yesterday's count.
     for (const [championName, gamesPlayed] of Object.entries(champions)) {
       await prisma.playerChampion.upsert({
         where: {
           playerId_championName: { playerId: dbPlayer.id, championName },
         },
-        update: { gamesPlayed },
+        update: { gamesPlayed: { increment: gamesPlayed } },
         create: { playerId: dbPlayer.id, championName, gamesPlayed },
       })
     }
