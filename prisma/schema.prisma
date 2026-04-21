@@ -44,12 +44,16 @@ model Match {
   id           String   @id @default(cuid())
   matchId      String   @unique
   region       String
+  queueId      Int      @default(420)
   gameDuration Int
   gameCreation DateTime
 
   participants MatchParticipant[]
 
   createdAt DateTime @default(now())
+
+  @@index([gameCreation])
+  @@index([queueId, gameCreation])
 }
 
 model MatchParticipant {
@@ -72,6 +76,7 @@ model MatchParticipant {
 
   @@index([puuid])
   @@index([puuid, championName])
+  @@index([championName])
 }
 
 model ChampionMastery {

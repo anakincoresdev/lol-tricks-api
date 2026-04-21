@@ -148,6 +148,7 @@ router.get('/collect', async (req, res) => {
       data: {
         matchId,
         region,
+        queueId: match.info.queueId,
         gameDuration: match.info.gameDuration,
         gameCreation: new Date(match.info.gameCreation),
         participants: {

@@ -56,6 +56,30 @@
     {
       "path": "/api/riot/collect?region=jp&tier=challenger",
       "schedule": "40 8 * * *"
+    },
+    {
+      "path": "/api/riot/sync-tiers?region=kr",
+      "schedule": "0 10 * * *"
+    },
+    {
+      "path": "/api/riot/sync-tiers?region=euw",
+      "schedule": "15 10 * * *"
+    },
+    {
+      "path": "/api/riot/sync-tiers?region=na",
+      "schedule": "30 10 * * *"
+    },
+    {
+      "path": "/api/riot/sync-tiers?region=eune",
+      "schedule": "45 10 * * *"
+    },
+    {
+      "path": "/api/riot/sync-tiers?region=br",
+      "schedule": "0 11 * * *"
+    },
+    {
+      "path": "/api/riot/sync-tiers?region=jp",
+      "schedule": "15 11 * * *"
     }
   ]
 }

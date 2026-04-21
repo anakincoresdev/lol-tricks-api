@@ -6,7 +6,9 @@ import { errorHandler } from './middleware/error-handler.js'
 import leagueRouter from './routes/league.js'
 import otpRouter from './routes/otp.js'
 import collectRouter from './routes/collect.js'
+import syncTiersRouter from './routes/sync-tiers.js'
 import championPlayersRouter from './routes/champion-players.js'
+import championPlayersGlobalRouter from './routes/champion-players-global.js'
 import matchesRouter from './routes/matches.js'
 import playerChampionMatchesRouter from './routes/player-champion-matches.js'
 
@@ -19,7 +21,9 @@ app.use(express.json())
 app.use('/api/riot', leagueRouter)
 app.use('/api/riot', otpRouter)
 app.use('/api/riot', collectRouter)
+app.use('/api/riot', syncTiersRouter)
 app.use('/api/riot', championPlayersRouter)
+app.use('/api/riot', championPlayersGlobalRouter)
 app.use('/api/riot', matchesRouter)
 app.use('/api/riot', playerChampionMatchesRouter)
 
