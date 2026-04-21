@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(npx prisma *)",
+      "Bash(npx tsc *)",
+      "Bash(npx tsx *)",
+      "Bash(npm run *)",
+      "Bash(curl -s \"http://localhost:3000/health\")",
+      "Bash(curl -s \"http://localhost:3001/api/riot/champion-players/global?champion=Ezreal\")"
     ]
   }
 }
