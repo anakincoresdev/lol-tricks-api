@@ -12,10 +12,19 @@
 // enforces dev-key 100-req / 2-min + 429-retry.
 //
 // Usage:
-//   node ops/deep-backfill.cjs                  # all 3 regions, all Master+
+//   node ops/deep-backfill.cjs                    # all 3 regions, all Master+
 //   node ops/deep-backfill.cjs --region=euw
-//   node ops/deep-backfill.cjs --max-matches=80 # cap per-player match count
+//   node ops/deep-backfill.cjs --max-matches=80   # cap per-player match count
 //   node ops/deep-backfill.cjs --player-limit=300
+//   node ops/deep-backfill.cjs --state-file=foo.json  # custom state file
+//
+// Parallel runs (3 keys, 3 regions — ~3x throughput):
+//   RIOT_API_KEY=KEY1 node ops/deep-backfill.cjs --region=euw &
+//   RIOT_API_KEY=KEY2 node ops/deep-backfill.cjs --region=na  &
+//   RIOT_API_KEY=KEY3 node ops/deep-backfill.cjs --region=kr  &
+//   wait
+// Each --region run gets its own state file (deep-backfill.<region>.state.json)
+// so the three processes don't clobber each other's cursors.
 
 const fs = require('fs')
 const path = require('path')
@@ -30,29 +39,51 @@ const {
   LOG_DIR,
 } = require('./shared.cjs')
 
-const STATE_FILE = path.join(LOG_DIR, 'deep-backfill.state.json')
 const WINDOW_DAYS = 60
 const PAGE_SIZE = 100
 
-function loadState() {
-  if (!fs.existsSync(STATE_FILE)) return { cursors: {} }
+// State file path is resolved at run-time from CLI flags so you can run
+// multiple instances in parallel (one per region, each with its own
+// RIOT_API_KEY) without stepping on each other's state. Default:
+//   --region=euw          → ops/logs/deep-backfill.euw.state.json
+//   (no --region)         → ops/logs/deep-backfill.state.json
+//   --state-file=foo.json → absolute or relative custom path
+function resolveStateFile(cfg) {
+  if (cfg.stateFile) return path.resolve(cfg.stateFile)
+  if (cfg.regions && cfg.regions.length === 1) {
+    return path.join(LOG_DIR, `deep-backfill.${cfg.regions[0]}.state.json`)
+  }
+  return path.join(LOG_DIR, 'deep-backfill.state.json')
+}
+
+function loadState(stateFile) {
+  if (!fs.existsSync(stateFile)) return { cursors: {} }
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))
+    return JSON.parse(fs.readFileSync(stateFile, 'utf8'))
   } catch {
     return { cursors: {} }
   }
 }
 
-function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
+function saveState(stateFile, state) {
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2))
 }
 
 function parseArgs() {
   const out = {
     regions: ['euw', 'na', 'kr'],
-    maxMatchesPerPlayer: 120,
+    // Cap per-player match history. The Riot API already filters by
+    // startTime (60d window), so this is a safety net against an
+    // extremely active player (Chall spamming 15+ ranked games/day).
+    // With 3 parallel Riot keys we can afford to pull essentially full
+    // histories: the selection filter in /global then decides who's an
+    // actual OTP. Previous default (120) was too low and under-counted
+    // totalGames for high-volume players, which made the play-rate
+    // threshold miss eligible OTPs.
+    maxMatchesPerPlayer: 500,
     playerLimit: null,
     reset: false,
+    stateFile: null,
   }
   for (const arg of process.argv.slice(2)) {
     const [k, v] = arg.replace(/^--/, '').split('=', 2)
@@ -61,11 +92,12 @@ function parseArgs() {
     else if (k === 'max-matches' && v) out.maxMatchesPerPlayer = Number(v)
     else if (k === 'player-limit' && v) out.playerLimit = Number(v)
     else if (k === 'reset') out.reset = true
+    else if (k === 'state-file' && v) out.stateFile = v
   }
   return out
 }
 
-async function backfillPlayer(puuid, region, cfg, state) {
+async function backfillPlayer(puuid, region, cfg, state, stateFile) {
   const regionalHost = getRegionalHost(region)
   const cursorKey = `${region}:${puuid}`
   const cursor = state.cursors[cursorKey] || { start: 0, done: false }
@@ -100,7 +132,7 @@ async function backfillPlayer(puuid, region, cfg, state) {
   const truncated = collectedIds.slice(0, cfg.maxMatchesPerPlayer)
   if (truncated.length === 0) {
     state.cursors[cursorKey] = { start, done: true }
-    saveState(state)
+    saveState(stateFile, state)
     return { fetched: 0, created: 0 }
   }
 
@@ -165,14 +197,16 @@ async function backfillPlayer(puuid, region, cfg, state) {
     start: cursor.start + truncated.length,
     done: truncated.length < cfg.maxMatchesPerPlayer,
   }
-  saveState(state)
+  saveState(stateFile, state)
   return { fetched: truncated.length, created }
 }
 
 async function main() {
   const cfg = parseArgs()
-  const state = cfg.reset ? { cursors: {} } : loadState()
-  if (cfg.reset) saveState(state)
+  const stateFile = resolveStateFile(cfg)
+  const state = cfg.reset ? { cursors: {} } : loadState(stateFile)
+  if (cfg.reset) saveState(stateFile, state)
+  console.log(`[deep-backfill] state file: ${stateFile}`)
 
   const players = await prisma.player.findMany({
     where: {
@@ -205,6 +239,7 @@ async function main() {
         p.region,
         cfg,
         state,
+        stateFile,
       )
       totalCreated += created
       const elapsed = Math.round((Date.now() - started) / 1000)
@@ -232,8 +267,9 @@ async function main() {
         status: e.status,
         message: e.message,
       })
-      // 403 = dead key, no point in continuing
-      if (e.status === 403) {
+      // 401/403 = dead key, no point in continuing. `shared.cjs`
+      // surfaces the actionable "regenerate" message via ApiError.
+      if (e.status === 401 || e.status === 403) {
         console.error('API key dead — aborting.')
         break
       }

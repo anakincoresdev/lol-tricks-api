@@ -4,3 +4,9 @@ dist
 .data
 .idea
 ops/logs/
+# Local Postgres volume for ops/docker-compose.yml — can reach 10-20 GB after
+# a full Master+ backfill. See ops/local-db.md.
+ops/pgdata/
+# pg_dump artefacts (see ops/local-db.md "Rescue what's already in Neon")
+*.dump
+*.dump.gz

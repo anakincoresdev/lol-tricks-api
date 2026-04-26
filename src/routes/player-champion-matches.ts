@@ -116,6 +116,25 @@ router.get('/player-champion-matches', async (req, res) => {
     `/lol/match/v5/matches/by-puuid/${puuid}/ids?queue=420&count=20`,
   )
 
+  // Participant summary for the 10 players in a match. Kept separate
+  // from the top-level match row (which holds the target player's
+  // build) so the client can render a team roster without rehashing
+  // every field. `gameName` is formatted `riotIdGameName#riotIdTagline`
+  // to match how we display player names elsewhere; falls back to the
+  // legacy `summonerName` for old Riot payloads where riotId fields may
+  // be empty strings.
+  interface ParticipantSummary {
+    puuid: string
+    gameName: string
+    championName: string
+    kills: number
+    deaths: number
+    assists: number
+    cs: number
+    position: string
+    win: boolean
+  }
+
   const championMatches: {
     matchId: string
     win: boolean
@@ -130,7 +149,24 @@ router.get('/player-champion-matches', async (req, res) => {
     gameDuration: number
     gameCreation: number
     position: string
+    participants: ParticipantSummary[]
   }[] = []
+
+  // Format a Riot-id display name. Prefer the new `riotIdGameName#tag`
+  // shape, fall back to the legacy summonerName when the new fields
+  // come back empty (happens for very old matches or region-migrated
+  // accounts where Riot hasn't populated the new identity yet).
+  function formatRiotId(p: {
+    riotIdGameName: string
+    riotIdTagline: string
+    summonerName: string
+  }): string {
+    if (p.riotIdGameName && p.riotIdTagline) {
+      return `${p.riotIdGameName}#${p.riotIdTagline}`
+    }
+    if (p.riotIdGameName) return p.riotIdGameName
+    return p.summonerName || 'Unknown'
+  }
 
   const targetCount = 8
 
@@ -153,6 +189,20 @@ router.get('/player-champion-matches', async (req, res) => {
     if (!player) continue
     if (player.championName.toLowerCase() !== champion.toLowerCase()) continue
 
+    const participants: ParticipantSummary[] = match.info.participants.map(
+      (pp) => ({
+        puuid: pp.puuid,
+        gameName: formatRiotId(pp),
+        championName: pp.championName,
+        kills: pp.kills,
+        deaths: pp.deaths,
+        assists: pp.assists,
+        cs: pp.totalMinionsKilled,
+        position: pp.teamPosition,
+        win: pp.win,
+      }),
+    )
+
     championMatches.push({
       matchId: match.metadata.matchId,
       win: player.win,
@@ -173,6 +223,7 @@ router.get('/player-champion-matches', async (req, res) => {
       gameDuration: match.info.gameDuration,
       gameCreation: match.info.gameCreation,
       position: player.teamPosition,
+      participants,
     })
   }
 

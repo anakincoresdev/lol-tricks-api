@@ -1,7 +1,14 @@
 // Shared helpers: env, Prisma client, Riot fetch with global token bucket.
 // CommonJS so it works with plain `node` on any machine (no tsx needed).
 
-require('dotenv/config')
+// `override: true` makes .env win over pre-existing shell env vars. Without
+// this, a stale `export RIOT_API_KEY=…` in the developer's zsh session
+// silently shadows the fresh value in .env and the script keeps jamming a
+// dead key against Riot, bailing with 401 until the user notices. Ops
+// scripts only ever run locally, so there's no deploy-side downside:
+// Vercel never has a .env file on disk (gitignored), so override has
+// nothing to override with and the injected env vars pass through.
+require('dotenv').config({ override: true })
 const { PrismaClient } = require('@prisma/client')
 
 const prisma = new PrismaClient()
@@ -25,11 +32,48 @@ function getRegionalHost(region) {
   return REGIONAL_HOSTS[region]
 }
 
-const RIOT_API_KEY = process.env.RIOT_API_KEY
+// Resolve which env var to read the Riot key from.
+//
+// Priority (first match wins):
+//   1. CLI flag --key=1|2|3 (or --key-var=NAME) on the script command line.
+//      --key=1 → RIOT_API_KEY, --key=2 → RIOT_API_KEY_SECOND,
+//      --key=3 → RIOT_API_KEY_THIRD. Works in any shell/OS because no
+//      `export` is involved.
+//   2. RIOT_KEY_VAR env var (legacy; useful for CI).
+//   3. Default: RIOT_API_KEY.
+//
+// This lets you run 3 parallel backfill processes with 3 different keys
+// without juggling shell-env exports, by just passing --key=N on each.
+function resolveKeyVarName() {
+  const KEY_SLOTS = {
+    1: 'RIOT_API_KEY',
+    first: 'RIOT_API_KEY',
+    2: 'RIOT_API_KEY_SECOND',
+    second: 'RIOT_API_KEY_SECOND',
+    3: 'RIOT_API_KEY_THIRD',
+    third: 'RIOT_API_KEY_THIRD',
+  }
+  for (const arg of process.argv.slice(2)) {
+    const [k, v] = arg.replace(/^--/, '').split('=', 2)
+    if (k === 'key' && v && KEY_SLOTS[v.toLowerCase()]) {
+      return KEY_SLOTS[v.toLowerCase()]
+    }
+    if (k === 'key-var' && v) return v
+  }
+  return process.env.RIOT_KEY_VAR || 'RIOT_API_KEY'
+}
+
+const RIOT_KEY_VAR = resolveKeyVarName()
+const RIOT_API_KEY = process.env[RIOT_KEY_VAR]
 if (!RIOT_API_KEY) {
-  console.error('RIOT_API_KEY missing in .env')
+  console.error(
+    `${RIOT_KEY_VAR} missing — add it to .env (or pass --key-var=OTHER_VAR).`,
+  )
   process.exit(1)
 }
+console.log(
+  `[riot] using key from $${RIOT_KEY_VAR} (${RIOT_API_KEY.slice(0, 10)}…)`,
+)
 
 // =====================================================================
 // Token bucket rate limiter
@@ -136,10 +180,14 @@ async function riotFetch(host, path, opts = {}) {
     }
 
     if (status === 404) throw new ApiError(404, 'Not found')
-    if (status === 403) {
+    if (status === 401 || status === 403) {
+      // Both statuses point at the same operational cause: the key in
+      // .env is missing, malformed, or expired (dev keys live 24h).
+      // 401 = server didn't get a usable key (header missing / value
+      // looks bogus). 403 = key present but Riot rejected it.
       throw new ApiError(
-        403,
-        'Invalid/expired Riot API key — check .env RIOT_API_KEY',
+        status,
+        `Invalid/expired Riot API key (${status}) — regenerate at https://developer.riotgames.com/ and update .env RIOT_API_KEY`,
       )
     }
     throw new ApiError(status, `Riot ${status} ${response.statusText}: ${path}`)

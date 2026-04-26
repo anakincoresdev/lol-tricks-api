@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: lol-tricks-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: loltricks
+      POSTGRES_PASSWORD: loltricks
+      POSTGRES_DB: loltricks
+    ports:
+      - '5432:5432'
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    shm_size: '1gb'

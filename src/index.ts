@@ -11,6 +11,8 @@ import championPlayersRouter from './routes/champion-players.js'
 import championPlayersGlobalRouter from './routes/champion-players-global.js'
 import matchesRouter from './routes/matches.js'
 import playerChampionMatchesRouter from './routes/player-champion-matches.js'
+import playerMatchesRouter from './routes/player-matches.js'
+import liveOtpFeedRouter from './routes/live-otp-feed.js'
 
 const app = express()
 
@@ -26,6 +28,8 @@ app.use('/api/riot', championPlayersRouter)
 app.use('/api/riot', championPlayersGlobalRouter)
 app.use('/api/riot', matchesRouter)
 app.use('/api/riot', playerChampionMatchesRouter)
+app.use('/api/riot', playerMatchesRouter)
+app.use('/api/riot', liveOtpFeedRouter)
 
 // Swagger docs
 app.get('/docs.json', (_req, res) => {
